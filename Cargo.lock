@@ -266,6 +266,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "gio-unix"
+version = "0.22.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce8d768735e229742c135afa3d3326604088d2df0679901cdb05e791fe2fbe0a"
+dependencies = [
+ "gio",
+ "gio-unix-sys",
+ "glib",
+ "libc",
+]
+
+[[package]]
+name = "gio-unix-sys"
+version = "0.22.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c01dbb58f92f67548d85e2209e073acc7ee04e107c7e04ee69b49e38b4933b4"
+dependencies = [
+ "gio-sys",
+ "glib-sys",
+ "gobject-sys",
+ "libc",
+ "system-deps",
+]
+
+[[package]]
 name = "glib"
 version = "0.22.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -501,9 +526,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "nyx-desktop"
+version = "0.1.0"
+source = "git+https://github.com/design-nexus/nyx-core.git?rev=394ddf8193797cd1f420fac98b097d04fa75f0e2#394ddf8193797cd1f420fac98b097d04fa75f0e2"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "gio",
+ "gio-unix",
+ "glib",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "nyx-theme"
 version = "0.1.0"
-source = "git+https://github.com/design-nexus/nyx-design.git?rev=5c4172947c18876c05d3173d2ebe2a1e434b098b#5c4172947c18876c05d3173d2ebe2a1e434b098b"
+source = "git+https://github.com/design-nexus/nyx-design.git?rev=b723d5535652a8e23e4676c328a02900fd17be0f#b723d5535652a8e23e4676c328a02900fd17be0f"
 dependencies = [
  "gtk4",
  "nyx-core",
@@ -514,10 +554,11 @@ dependencies = [
 [[package]]
 name = "nyx-ui"
 version = "0.1.0"
-source = "git+https://github.com/design-nexus/nyx-design.git?rev=5c4172947c18876c05d3173d2ebe2a1e434b098b#5c4172947c18876c05d3173d2ebe2a1e434b098b"
+source = "git+https://github.com/design-nexus/nyx-design.git?rev=b723d5535652a8e23e4676c328a02900fd17be0f#b723d5535652a8e23e4676c328a02900fd17be0f"
 dependencies = [
  "gtk4",
  "nyx-core",
+ "nyx-desktop",
  "nyx-theme",
 ]
 
