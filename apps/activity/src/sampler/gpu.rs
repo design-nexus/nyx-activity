@@ -140,11 +140,22 @@ fn cards() -> Vec<Card> {
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
             .unwrap_or_default();
         let hex = |f: &str| read(&dev.join(f).to_string_lossy()).trim().trim_start_matches("0x").to_lowercase();
-        let ids = ["/usr/share/hwdata/pci.ids", "/usr/share/misc/pci.ids"].iter().map(|p| read(p)).find(|t| !t.is_empty());
+        let ids = pci_ids_paths().iter().map(|p| read(&p.to_string_lossy())).find(|t| !t.is_empty());
         let desc = ids.and_then(|t| pci_ids_name(&t, &hex("vendor"), &hex("device"))).unwrap_or_default();
         out.push(Card { dir, pci, vendor, driver, name: pretty_name(&desc, vendor) });
     }
     out
+}
+
+/// Where pci.ids may be: the usual fixed places, then `hwdata/pci.ids` under each
+/// XDG data folder (NixOS has no /usr/share).
+fn pci_ids_paths() -> Vec<PathBuf> {
+    let xdg = std::env::var("XDG_DATA_DIRS").unwrap_or_default();
+    ["/usr/share/hwdata/pci.ids", "/usr/share/misc/pci.ids"]
+        .map(PathBuf::from)
+        .into_iter()
+        .chain(xdg.split(':').filter(|d| d.starts_with('/')).map(|d| Path::new(d).join("hwdata/pci.ids")))
+        .collect()
 }
 
 fn num(path: &Path) -> Option<f64> {
