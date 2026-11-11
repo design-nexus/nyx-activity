@@ -107,7 +107,12 @@ pub fn generate(state: &State) -> String {
          -- Loaded from hyprland.lua with: require(\"hypr.activity\")\n",
     );
     for m in &state.hyprland {
-        let line = format!("o.launch_on_start({})", lua_quote(&m.command));
+        // Omarchy's helper where its config is loaded; elsewhere (NyxOS) Hyprland's own
+        // start hook, which is what that helper does.
+        let q = lua_quote(&m.command);
+        let line = format!(
+            "if o and o.launch_on_start then o.launch_on_start({q}) else hl.on(\"hyprland.start\", function() hl.exec_cmd(\"uwsm app -- \" .. {q}) end) end"
+        );
         if m.enabled {
             out.push_str(&format!("{line} -- {}\n", m.name.replace('\n', " ")));
         } else {
@@ -124,16 +129,22 @@ pub fn save(state: &State) -> Result<()> {
     Ok(())
 }
 
-/// Whether hyprland.lua loads our file.
+/// Whether hyprland.lua loads our file (`require("hypr.activity")`, or NyxOS's own
+/// loader of `activity.lua`).
 pub fn included() -> bool {
     std::fs::read_to_string(paths::hyprland_lua())
-        .map(|t| t.lines().any(|l| !l.trim_start().starts_with("--") && l.contains("hypr.activity")))
+        .map(|t| t.lines().any(|l| !l.trim_start().starts_with("--") && (l.contains("hypr.activity") || l.contains("hypr/activity.lua"))))
         .unwrap_or(false)
 }
 
 /// Append the one `require` line to hyprland.lua, after a backup. Only on request.
 pub fn add_include() -> Result<PathBuf> {
     let path = paths::hyprland_lua();
+    // A hyprland.lua another tool manages (Home Manager's link on NyxOS) isn't edited:
+    // writing it would replace the link with a copy.
+    if path.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()) {
+        anyhow::bail!("this system manages hyprland.lua; its configuration loads Activity's startup items itself");
+    }
     let text = std::fs::read_to_string(&path).context("could not read hyprland.lua")?;
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let backup = path.with_file_name(format!("hyprland.lua.activity-bak.{stamp}"));
@@ -567,8 +578,10 @@ o.exec_on_start('say "hi"')
             ],
         };
         let lua = generate(&s);
-        assert!(lua.contains("o.launch_on_start(\"signal-desktop\") -- Chat\n"));
-        assert!(lua.contains("-- off: o.launch_on_start(\"x \\\"y\\\"\")"));
+        assert!(lua.contains(
+            "if o and o.launch_on_start then o.launch_on_start(\"signal-desktop\") else hl.on(\"hyprland.start\", function() hl.exec_cmd(\"uwsm app -- \" .. \"signal-desktop\") end) end -- Chat\n"
+        ));
+        assert!(lua.contains("-- off: if o and o.launch_on_start then o.launch_on_start(\"x \\\"y\\\"\")"));
         assert_eq!(parse_autostart_lua(&lua).len(), 1);
     }
 
