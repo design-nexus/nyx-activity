@@ -160,11 +160,6 @@ fn build(app: &gtk::Application) {
     stack.set_transition_type(gtk::StackTransitionType::Crossfade);
     stack.set_transition_duration(if prefs::get().reduce_motion { 0 } else { 160 });
 
-    let body = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    body.set_vexpand(true);
-    body.append(&nav);
-    body.append(&stack);
-
     // ----- Header -----
     // The app and the page, the sidebar toggle; what's running, the live/paused pill,
     // the page's config files, search and Settings at the end.
@@ -182,14 +177,10 @@ fn build(app: &gtk::Application) {
     header.end.append(&search);
     header.end.append(&chrome::settings_button(settings_dialog::open));
 
-    let frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    frame.add_css_class("window-frame");
-    frame.append(&header.root);
-    frame.append(&body);
-
-    let overlay = gtk::Overlay::new();
-    overlay.set_child(Some(&frame));
-    window.set_child(Some(&overlay));
+    let frame = nyx_ui::frame::AppFrame::new(&header.root);
+    frame.set_sidebar(&nav);
+    frame.set_page(&stack);
+    let overlay = frame.install(&window);
     let toast = gtk::Label::new(None);
     toast.set_wrap(true);
     toast.set_max_width_chars(70);
