@@ -111,9 +111,13 @@ fn build(app: &gtk::Application) {
     for s in sections.iter().filter(|s| s.id != "settings") {
         if s.group != last_group {
             let g = widgets::label(&s.group.to_uppercase(), "nav-group");
-            if last_group.is_empty() {
+            let first = last_group.is_empty();
+            if first {
                 g.add_css_class("first");
             }
+            // The first group in the app's accent, the others from the theme's [sections.activity].
+            let section = if first { nyx_ui::sidebar::ACCENT_SECTION.to_string() } else { s.group.to_lowercase() };
+            nyx_ui::sidebar::set_section(&g, &section);
             compact_hide.push(g.clone().upcast());
             list.append(&g);
             last_group = s.group;
