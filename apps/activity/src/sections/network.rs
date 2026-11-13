@@ -28,37 +28,34 @@ pub fn build(page: &Page) {
 /// Processes with the most open connections, by app.
 fn conn_bars(s: &Snapshot) -> Vec<Bar> {
     let Some(c) = &s.conns else { return Vec::new() };
-    let mut by_group: Vec<(String, Vec<i32>, i32, usize)> = Vec::new();
+    let mut by_group: Vec<((String, String), i32, usize)> = Vec::new();
     for (pid, n) in &c.by_pid {
         let group = s.groups.iter().find(|g| g.pids.contains(pid));
-        let (name, pids, leader) = match group {
-            Some(g) => (g.name.clone(), g.pids.clone(), g.leader),
+        let (identity, leader) = match group {
+            Some(g) => (top::group_identity(g, s), g.leader),
             None => {
                 let name = s.procs.as_ref().and_then(|p| p.iter().find(|p| p.pid == *pid)).map(|p| p.name.clone());
-                (name.unwrap_or_else(|| pid.to_string()), vec![*pid], *pid)
+                (top::app_identity(&name.unwrap_or_else(|| pid.to_string()), &[*pid], s), *pid)
             }
         };
-        match by_group.iter_mut().find(|(_, _, l, _)| *l == leader) {
-            Some(e) => e.3 += n,
-            None => by_group.push((name, pids, leader, *n)),
+        match by_group.iter_mut().find(|(_, l, _)| *l == leader) {
+            Some(e) => e.2 += n,
+            None => by_group.push((identity, leader, *n)),
         }
     }
-    by_group.sort_by(|a, b| b.3.cmp(&a.3).then(a.0.cmp(&b.0)));
+    by_group.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.0.cmp(&b.0.0)));
     by_group.truncate(8);
-    let max = by_group.first().map_or(1, |g| g.3).max(1) as f64;
+    let max = by_group.first().map_or(1, |g| g.2).max(1) as f64;
     by_group
         .into_iter()
-        .map(|(name, pids, leader, n)| {
-            let (name, icon) = top::app_identity(&name, &pids, s);
-            Bar {
-                name,
-                icon,
-                frac: n as f64 / max,
-                value: if n == 1 { "1 conn.".into() } else { format!("{n} conn.") },
-                tip: String::new(),
-                pid: leader,
-                warn: false,
-            }
+        .map(|((name, icon), leader, n)| Bar {
+            name,
+            icon,
+            frac: n as f64 / max,
+            value: if n == 1 { "1 conn.".into() } else { format!("{n} conn.") },
+            tip: String::new(),
+            pid: leader,
+            warn: false,
         })
         .collect()
 }

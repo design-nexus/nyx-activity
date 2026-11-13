@@ -31,6 +31,8 @@ pub struct Prefs {
     pub hidden_columns: Vec<String>,
     /// Processes view: apps, all, tree or mine.
     pub process_view: String,
+    /// All: each app's or service's processes under one row.
+    pub group_processes: bool,
     /// Processes column widths in pixels, by column id.
     pub column_widths: std::collections::HashMap<String, i32>,
     /// Processes column order, by column id.
@@ -86,6 +88,7 @@ impl Default for Prefs {
             pause_hidden: true,
             hidden_columns: vec!["threads".into(), "state".into()],
             process_view: "all".into(),
+            group_processes: true,
             column_widths: Default::default(),
             column_order: Vec::new(),
             sort_column: "cpu".into(),

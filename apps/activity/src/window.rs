@@ -55,6 +55,11 @@ pub fn present(app: &gtk::Application, section: Option<&str>) {
     if let Some(ui) = ui() {
         ui.borrow().window.present();
     }
+    // Developer aid: a test copy opens with this row selected (a group's id is negative),
+    // so its details show without anyone clicking.
+    if let Some(pid) = std::env::var("NYX_ACTIVITY_REVEAL").ok().and_then(|p| p.parse().ok()) {
+        live::ready(move |_| crate::sections::processes::reveal(pid));
+    }
 }
 
 /// Our own symbolic icons (the icon theme may lack a CPU or memory glyph).

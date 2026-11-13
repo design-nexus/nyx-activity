@@ -67,6 +67,21 @@ pub fn app_identity(name: &str, pids: &[i32], snap: &Snapshot) -> (String, Strin
     }
 }
 
+pub fn kind_name(kind: Kind) -> &'static str {
+    match kind {
+        Kind::App => "App",
+        Kind::Service => "Service",
+        Kind::Other => "Group",
+    }
+}
+
+/// A group's display name and icon. Only an app's own scope takes a window's name:
+/// a window launched straight into the session or a service doesn't speak for it.
+pub fn group_identity(g: &Group, snap: &Snapshot) -> (String, String) {
+    let pids: &[i32] = if g.kind == Kind::App { &g.pids } else { &[] };
+    app_identity(&g.name, pids, snap)
+}
+
 /// Bar lengths are relative to the biggest item, or to `whole` when given (all of RAM, say).
 fn scale(values: &[f64], whole: Option<f64>) -> f64 {
     whole.unwrap_or_else(|| values.iter().copied().fold(0.0, f64::max)).max(1e-9)
@@ -103,12 +118,8 @@ pub fn groups(snap: &Snapshot, by: By, n: usize, whole: Option<f64>) -> Vec<Bar>
     let max = scale(&gs.iter().map(|g| by.group(g)).collect::<Vec<_>>(), whole);
     gs.into_iter()
         .map(|g| {
-            let (name, icon) = app_identity(&g.name, &g.pids, snap);
-            let what = match g.kind {
-                Kind::App => "App",
-                Kind::Service => "Service",
-                Kind::Other => "Group",
-            };
+            let (name, icon) = group_identity(g, snap);
+            let what = kind_name(g.kind);
             let procs = if g.procs == 1 { "1 process".to_string() } else { format!("{} processes", g.procs) };
             let mut tip = format!("{name} · {what} {} · {procs}", g.unit);
             if by == By::Mem && g.cache > 0 {
@@ -118,4 +129,20 @@ pub fn groups(snap: &Snapshot, by: By, n: usize, whole: Option<f64>) -> Vec<Bar>
             Bar { name, icon, frac: by.group(g) / max, value: by.show(by.group(g)), tip, pid: g.leader, warn: false }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sampler::windows::Window;
+
+    #[test]
+    fn only_app_scopes_take_a_window_name() {
+        let window = Window { pid: 42, class: "io.github.design_nexus.nyx.Activity".into(), ..Default::default() };
+        let snap = Snapshot { windows: vec![window], ..Default::default() };
+        let session = Group { name: "Hyprland".into(), kind: Kind::Other, pids: vec![1, 42], ..Default::default() };
+        assert_eq!(group_identity(&session, &snap), app_identity("Hyprland", &[], &snap));
+        let app = Group { kind: Kind::App, ..session.clone() };
+        assert_eq!(group_identity(&app, &snap), app_identity("Hyprland", &[1, 42], &snap));
+    }
 }

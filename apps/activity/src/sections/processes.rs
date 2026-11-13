@@ -3,8 +3,10 @@
 //! visibility ourselves, and let GTK's sort/filter models follow. Selection and
 //! scroll position survive updates because the objects never change identity.
 
+use super::top::{self, kind_name};
 use crate::actions::{self, Signal};
 use crate::sampler::Snapshot;
+use crate::sampler::groups::{Group, Kind};
 use crate::sampler::procs::Proc;
 use crate::widgets::{self, Page};
 use crate::{apps, fmt, graph, live, prefs, window};
@@ -32,6 +34,19 @@ pub struct Row {
     pub order: u32,
     /// Summed over the subtree, shown while a group is collapsed.
     pub agg: Option<Agg>,
+    /// Set on an app's or service's row in grouped All; its `p` describes the group.
+    pub group: Option<GroupRow>,
+}
+
+/// An app's or service's processes, under one row.
+#[derive(Debug, Clone, Default)]
+pub struct GroupRow {
+    /// The cgroup path, which identifies the group from one tick to the next.
+    pub path: String,
+    pub unit: String,
+    pub kind: Kind,
+    pub pids: Vec<i32>,
+    pub leader: i32,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -59,6 +74,10 @@ impl Row {
     }
     fn threads(&self) -> u32 {
         self.agg.map_or(self.p.threads, |a| a.threads)
+    }
+    /// The process this row stands for: a group's leader, or its own.
+    fn pid(&self) -> i32 {
+        self.group.as_ref().map_or(self.p.pid, |g| g.leader)
     }
 }
 
@@ -142,7 +161,7 @@ fn state_name(c: char) -> &'static str {
 fn compare(col: Col, a: &Row, b: &Row) -> Ordering {
     match col {
         Col::Name => a.p.name.to_lowercase().cmp(&b.p.name.to_lowercase()).then(a.p.pid.cmp(&b.p.pid)),
-        Col::Pid => a.p.pid.cmp(&b.p.pid),
+        Col::Pid => a.pid().cmp(&b.pid()),
         Col::User => a.p.user.cmp(&b.p.user).then(a.p.pid.cmp(&b.p.pid)),
         Col::Cpu => a.cpu().total_cmp(&b.cpu()),
         Col::Mem => a.mem().cmp(&b.mem()),
@@ -196,6 +215,14 @@ struct State {
     /// Apps view: groups the user opened. Tree view: branches the user closed.
     opened: HashSet<i32>,
     closed: HashSet<i32>,
+    /// All: each app's or service's processes under one row.
+    grouped: bool,
+    group_chip: gtk::Button,
+    /// Group rows' ids (negative, so never a pid), kept by cgroup path.
+    group_ids: HashMap<String, i32>,
+    next_group_id: i32,
+    /// Groups the user opened, by cgroup path.
+    opened_groups: HashSet<String>,
     bound: HashMap<usize, (ProcObject, Col, gtk::Widget)>,
     icons: HashMap<(i32, String), String>,
     search: gtk::SearchEntry,
@@ -293,8 +320,7 @@ fn set_heat(l: &gtk::Label, level: usize, zero: bool) {
     }
 }
 
-fn render(col: Col, row: &Row, w: &gtk::Widget, view: View) {
-    let tree = matches!(view, View::Apps | View::Tree);
+fn render(col: Col, row: &Row, w: &gtk::Widget, view: View, tree: bool) {
     match col {
         Col::Name => {
             let Some(indent) = w.first_child() else { return };
@@ -321,7 +347,11 @@ fn render(col: Col, row: &Row, w: &gtk::Widget, view: View) {
             if name.text() != text {
                 name.set_text(&text);
             }
-            let tip = if row.p.cmdline.is_empty() { format!("[{}]", row.p.name) } else { row.p.cmdline.clone() };
+            let tip = match &row.group {
+                Some(g) => format!("{} {}", kind_name(g.kind), g.unit),
+                None if row.p.cmdline.is_empty() => format!("[{}]", row.p.name),
+                None => row.p.cmdline.clone(),
+            };
             name.set_tooltip_text(Some(&tip));
             match (row.agg, row.p.state) {
                 (Some(a), _) if a.count > 1 => {
@@ -350,6 +380,7 @@ fn render(col: Col, row: &Row, w: &gtk::Widget, view: View) {
             let mem_total = MEM_TOTAL.with(|m| m.get());
             let heat = |v: f64| heat_level(col, v, mem_total);
             let (text, level, zero) = match col {
+                Col::Pid | Col::State if row.group.is_some() => (String::new(), 0, false),
                 Col::Pid => (row.p.pid.to_string(), 0, false),
                 Col::User => (row.p.user.clone(), 0, false),
                 Col::Cpu => {
@@ -385,6 +416,16 @@ fn render(col: Col, row: &Row, w: &gtk::Widget, view: View) {
     }
 }
 
+/// All, with each app's or service's processes under one row.
+fn grouping(s: &State) -> bool {
+    s.view == View::All && s.grouped
+}
+
+/// Rows have branches to open and close.
+fn is_tree(s: &State) -> bool {
+    matches!(s.view, View::Apps | View::Tree) || grouping(s)
+}
+
 fn key(w: &gtk::Widget) -> usize {
     w.as_ptr() as usize
 }
@@ -410,8 +451,8 @@ fn make_column(col: Col, title: &str, width: i32) -> gtk::ColumnViewColumn {
         let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
         let (Some(obj), Some(w)) = (item.item().and_downcast::<ProcObject>(), item.child()) else { return };
         let Some(st) = state() else { return };
-        let view = st.borrow().view;
-        render(col, &obj.row(), &w, view);
+        let (view, tree) = (st.borrow().view, is_tree(&st.borrow()));
+        render(col, &obj.row(), &w, view, tree);
         st.borrow_mut().bound.insert(key(&w), (obj, col, w));
     });
     factory.connect_unbind(move |_, item| {
@@ -471,10 +512,31 @@ fn update(snap: &Snapshot) {
     let window_pids: HashSet<i32> = windows.keys().copied().collect();
     let (store, removed, added) = {
         let mut s = st.borrow_mut();
-        let alive: HashSet<i32> = procs.iter().map(|p| p.pid).collect();
+        let headers = if grouping(&s) { group_rows(&mut s, snap, procs) } else { Vec::new() };
+        let alive: HashSet<i32> = procs.iter().map(|p| p.pid).chain(headers.iter().map(|r| r.p.pid)).collect();
         let dead: Vec<i32> = s.objects.keys().filter(|p| !alive.contains(p)).copied().collect();
         let removed: Vec<ProcObject> = dead.iter().filter_map(|pid| s.objects.remove(pid)).collect();
         let mut added = Vec::new();
+        // A process to show opens the group it's in.
+        if let Some(pid) = s.pending_reveal
+            && let Some(g) = headers.iter().filter_map(|r| r.group.as_ref()).find(|g| g.pids.contains(&pid))
+        {
+            s.opened_groups.insert(g.path.clone());
+        }
+        for row in headers {
+            if let Some(obj) = s.objects.get(&row.p.pid) {
+                let mut r = obj.row_mut();
+                r.p = row.p;
+                r.icon = row.icon;
+                r.address = row.address;
+                r.group = row.group;
+            } else {
+                let id = row.p.pid;
+                let obj = ProcObject::new(row);
+                added.push(obj.clone());
+                s.objects.insert(id, obj);
+            }
+        }
         for p in procs {
             let win = windows.get(&p.pid);
             let class = win.map(|w| w.class.clone());
@@ -561,17 +623,131 @@ fn apply_view(st: &Rc<RefCell<State>>) {
         adj.set_value(before);
         glib::idle_add_local_once(move || adj.set_value(before));
     }
-    let (view, bound): (View, Vec<(ProcObject, Col, gtk::Widget)>) = {
+    let (view, tree, bound): (View, bool, Vec<(ProcObject, Col, gtk::Widget)>) = {
         let s = st.borrow();
-        (s.view, s.bound.values().cloned().collect())
+        (s.view, is_tree(&s), s.bound.values().cloned().collect())
     };
     for (obj, col, w) in bound {
-        render(col, &obj.row(), &w, view);
+        render(col, &obj.row(), &w, view, tree);
     }
 }
 
 /// Per pid: visible, order, depth, has children, expanded, collapsed totals.
 type Placement = (bool, u32, u32, bool, bool, Option<Agg>);
+
+/// A row for each app or service with more than one process (grouped All).
+fn group_rows(s: &mut State, snap: &Snapshot, procs: &[Proc]) -> Vec<Row> {
+    let by_pid: HashMap<i32, &Proc> = procs.iter().map(|p| (p.pid, p)).collect();
+    let mut rows = Vec::new();
+    for g in snap.groups.iter().filter(|g| g.procs > 1) {
+        let id = match s.group_ids.get(&g.path) {
+            Some(id) => *id,
+            None => {
+                let id = s.next_group_id;
+                s.next_group_id -= 1;
+                s.group_ids.insert(g.path.clone(), id);
+                id
+            }
+        };
+        rows.push(group_row(id, g, snap, by_pid.get(&g.leader).copied()));
+    }
+    let live: HashSet<&str> = snap.groups.iter().map(|g| g.path.as_str()).collect();
+    s.group_ids.retain(|path, _| live.contains(path.as_str()));
+    s.opened_groups.retain(|path| live.contains(path.as_str()));
+    rows
+}
+
+fn group_row(id: i32, g: &Group, snap: &Snapshot, leader: Option<&Proc>) -> Row {
+    let (name, icon) = top::group_identity(g, snap);
+    let address = match g.kind {
+        Kind::App => snap.windows.iter().find(|w| g.pids.contains(&w.pid)).map(|w| w.address.clone()).unwrap_or_default(),
+        _ => String::new(),
+    };
+    let p = Proc {
+        pid: id,
+        name,
+        cmdline: leader.map(|l| l.cmdline.clone()).unwrap_or_default(),
+        uid: leader.map_or(0, |l| l.uid),
+        user: leader.map(|l| l.user.clone()).unwrap_or_default(),
+        start: leader.map_or(0.0, |l| l.start),
+        cgroup: g.path.clone(),
+        ..Default::default()
+    };
+    let group = GroupRow { path: g.path.clone(), unit: g.unit.clone(), kind: g.kind, pids: g.pids.clone(), leader: g.leader };
+    Row { p, icon, address, group: Some(group), ..Default::default() }
+}
+
+/// Processes added up, as a collapsed branch shows them.
+fn sum<'a>(rows: impl Iterator<Item = &'a Row>) -> Agg {
+    rows.fold(Agg::default(), |mut a, r| {
+        a.cpu += r.p.cpu;
+        a.mem += r.p.rss;
+        a.disk += r.p.read_bps + r.p.write_bps;
+        a.gpu = (a.gpu + r.p.gpu).min(100.0);
+        a.threads += r.p.threads;
+        a.count += 1;
+        a
+    })
+}
+
+/// Each group row's processes still running, and their totals on the group row.
+fn add_group_totals(rows: &mut HashMap<i32, Row>) -> HashMap<i32, Vec<i32>> {
+    let members: HashMap<i32, Vec<i32>> = rows
+        .iter()
+        .filter_map(|(id, r)| {
+            let g = r.group.as_ref()?;
+            Some((*id, g.pids.iter().copied().filter(|p| rows.get(p).is_some_and(|m| m.group.is_none())).collect()))
+        })
+        .collect();
+    for (id, pids) in &members {
+        let a = sum(pids.iter().map(|p| &rows[p]));
+        if let Some(r) = rows.get_mut(id) {
+            r.agg = Some(a);
+        }
+    }
+    members
+}
+
+/// Grouped All: group rows and lone processes sorted together, each group's
+/// processes under it while it's open. A filter shows the groups with a match,
+/// opened to the matching processes.
+fn place_grouped(
+    rows: &HashMap<i32, Row>,
+    mut members: HashMap<i32, Vec<i32>>,
+    opened: &HashSet<String>,
+    q: &str,
+    show_kernel: bool,
+    cmp: impl Fn(&i32, &i32) -> Ordering,
+) -> HashMap<i32, Placement> {
+    let in_group: HashSet<i32> = members.values().flatten().copied().collect();
+    let mut top: Vec<i32> = rows
+        .values()
+        .filter(|r| r.group.is_some() || (!in_group.contains(&r.p.pid) && (show_kernel || !r.p.kernel)))
+        .map(|r| r.p.pid)
+        .collect();
+    top.sort_by(&cmp);
+    let mut out = HashMap::new();
+    let mut order = 0u32;
+    for id in top {
+        let row = &rows[&id];
+        let (Some(group), Some(kids)) = (&row.group, members.get_mut(&id)) else {
+            out.insert(id, (matches(row, q), order, 0, false, false, None));
+            order += 1;
+            continue;
+        };
+        kids.sort_by(&cmp);
+        let hits: Vec<bool> = kids.iter().map(|k| matches(&rows[k], q)).collect();
+        let any = hits.iter().any(|h| *h);
+        let (shown, expanded) = if q.is_empty() { (true, opened.contains(&group.path)) } else { (any || matches(row, q), any) };
+        out.insert(id, (shown, order, 0, !kids.is_empty(), expanded, row.agg));
+        order += 1;
+        for (k, hit) in kids.iter().zip(hits) {
+            out.insert(*k, (shown && expanded && hit, order, 1, false, false, None));
+            order += 1;
+        }
+    }
+    out
+}
 
 /// Work out visibility, order, depth and aggregates for the current view.
 fn layout(s: &mut State, window_pids: &HashSet<i32>) {
@@ -579,7 +755,9 @@ fn layout(s: &mut State, window_pids: &HashSet<i32>) {
     let q = s.query.to_lowercase();
     let q = q.trim();
     let show_kernel = prefs::get().kernel_threads;
-    let rows: HashMap<i32, Row> = s.objects.iter().map(|(pid, o)| (*pid, o.row().clone())).collect();
+    let mut rows: HashMap<i32, Row> = s.objects.iter().map(|(pid, o)| (*pid, o.row().clone())).collect();
+    let members = if grouping(s) { add_group_totals(&mut rows) } else { HashMap::new() };
+    let rows = rows;
     let cmp = |a: &i32, b: &i32| {
         let o = compare(col, &rows[a], &rows[b]);
         if desc { o.reverse() } else { o }
@@ -595,7 +773,9 @@ fn layout(s: &mut State, window_pids: &HashSet<i32>) {
     };
 
     let tree_view = matches!(s.view, View::Apps | View::Tree);
-    if !tree_view {
+    if grouping(s) {
+        out = place_grouped(&rows, members, &s.opened_groups, q, show_kernel, cmp);
+    } else if !tree_view {
         let my_uid = s.my_uid;
         let mine = s.view == View::Mine;
         let apps = s.view == View::Apps;
@@ -769,11 +949,42 @@ fn toggle_expanded(pid: i32) {
     let Some(st) = state() else { return };
     {
         let mut s = st.borrow_mut();
-        let set = if s.view == View::Apps { &mut s.opened } else { &mut s.closed };
-        if !set.remove(&pid) {
-            set.insert(pid);
+        let path = s.objects.get(&pid).and_then(|o| o.row().group.as_ref().map(|g| g.path.clone()));
+        if let Some(path) = path {
+            if !s.opened_groups.remove(&path) {
+                s.opened_groups.insert(path);
+            }
+        } else {
+            let set = if s.view == View::Apps { &mut s.opened } else { &mut s.closed };
+            if !set.remove(&pid) {
+                set.insert(pid);
+            }
         }
     }
+    refilter();
+}
+
+/// The row above `pid` in the current view: its group row in grouped All, else its parent.
+fn parent_row(s: &State, pid: i32, ppid: i32) -> i32 {
+    if !grouping(s) {
+        return ppid;
+    }
+    s.objects.iter().find(|(_, o)| o.row().group.as_ref().is_some_and(|g| g.pids.contains(&pid))).map_or(ppid, |(id, _)| *id)
+}
+
+fn toggle_grouping() {
+    let Some(st) = state() else { return };
+    let on = {
+        let mut s = st.borrow_mut();
+        s.grouped = !s.grouped;
+        if s.grouped {
+            s.group_chip.add_css_class("selected");
+        } else {
+            s.group_chip.remove_css_class("selected");
+        }
+        s.grouped
+    };
+    prefs::update(|p| p.group_processes = on);
     refilter();
 }
 
@@ -782,6 +993,7 @@ fn set_view(v: View) {
     {
         let mut s = st.borrow_mut();
         s.view = v;
+        s.group_chip.set_visible(v == View::All);
         for (view, b) in &s.chips {
             if *view == v {
                 b.add_css_class("selected");
@@ -837,12 +1049,8 @@ pub fn reveal(pid: i32) {
             set_view(View::All);
         }
     }
-    let visible = st.borrow().objects.get(&pid).is_some_and(|o| o.row().visible);
-    if visible {
-        select_pid(pid);
-    } else {
-        st.borrow_mut().pending_reveal = Some(pid);
-    }
+    st.borrow_mut().pending_reveal = Some(pid);
+    refilter();
 }
 
 pub fn focus_search() {
@@ -852,9 +1060,29 @@ pub fn focus_search() {
     }
 }
 
+/// The selected processes, a group row standing for each of its own.
+fn selected_procs(st: &State) -> Vec<ProcObject> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for o in selected(st) {
+        let pids = match &o.row().group {
+            Some(g) => g.pids.clone(),
+            None => vec![o.row().p.pid],
+        };
+        for pid in pids {
+            if seen.insert(pid)
+                && let Some(m) = st.objects.get(&pid)
+            {
+                out.push(m.clone());
+            }
+        }
+    }
+    out
+}
+
 /// The selected processes, minus kernel threads (signals can't reach them).
 fn targets(st: &State) -> Vec<(i32, String)> {
-    selected(st).iter().filter(|o| !o.row().p.kernel).map(|o| (o.row().p.pid, o.row().p.name.clone())).collect()
+    selected_procs(st).iter().filter(|o| !o.row().p.kernel).map(|o| (o.row().p.pid, o.row().p.name.clone())).collect()
 }
 
 fn end_selected(sig: Signal) {
@@ -875,6 +1103,8 @@ struct Details {
     /// Everything below the head; hidden while the panel is collapsed.
     more: gtk::Box,
     values: Vec<gtk::Label>,
+    /// The readings and the actions; fewer per row while docked beside the table.
+    flows: [gtk::FlowBox; 2],
     cmdline: gtk::Label,
     graphs: gtk::Box,
     pid: Rc<Cell<i32>>,
@@ -1066,7 +1296,7 @@ fn details_panel() -> Details {
     priority.set_popover(Some(&pop));
     let p = pid.clone();
     let location = gtk::Button::with_label("Open location");
-    location.connect_clicked(move |_| actions::open_location(p.get()));
+    location.connect_clicked(move |_| actions::open_location(object(p.get()).map_or(p.get(), |o| o.row().pid())));
     let p = pid.clone();
     let copy = gtk::Button::with_label("Copy command");
     copy.connect_clicked(move |_| {
@@ -1104,6 +1334,7 @@ fn details_panel() -> Details {
         subtitle,
         more,
         values,
+        flows: [flow, buttons],
         cmdline,
         graphs,
         pid,
@@ -1122,7 +1353,7 @@ fn pause_selected() {
     let Some(st) = state() else { return };
     let (t, all_stopped) = {
         let s = st.borrow();
-        let sel: Vec<ProcObject> = selected(&s).into_iter().filter(|o| !o.row().p.kernel).collect();
+        let sel: Vec<ProcObject> = selected_procs(&s).into_iter().filter(|o| !o.row().p.kernel).collect();
         let all = !sel.is_empty() && sel.iter().all(|o| o.row().p.state == 'T');
         (targets(&s), all)
     };
@@ -1158,12 +1389,16 @@ fn refresh_details(snap: &Snapshot) {
     };
     let r = obj.row().clone();
     d.revealer.set_reveal_child(true);
+    // A group's own processes are in the table; its graphs would be only its leader's.
+    d.graphs.set_visible(r.group.is_none());
     if d.pid.get() != r.p.pid {
         d.pid.set(r.p.pid);
-        live::track(r.p.pid);
         while let Some(c) = d.graphs.first_child() {
             d.graphs.remove(&c);
         }
+    }
+    if r.group.is_none() && d.graphs.first_child().is_none() {
+        live::track(r.p.pid);
         let series = |key: String, tone| vec![graph::Series::new(key, "", tone)];
         let cpu = graph::sparkline(
             series(format!("proc.{}.cpu", r.p.pid), graph::Tone::Accent),
@@ -1190,7 +1425,15 @@ fn refresh_details(snap: &Snapshot) {
     d.title.set_text(&name);
     let more = if sel.len() > 1 { format!(" · {} selected", sel.len()) } else { String::new() };
     let compact = !d.more.is_visible();
-    let markup = if compact {
+    let count = r.agg.map_or(1, |a| a.count);
+    let markup = if let Some(g) = &r.group {
+        let head = if compact {
+            format!("{count} processes · {} · {}", fmt::pct(r.cpu()), fmt::bytes(r.mem() as f64))
+        } else {
+            format!("{} {} · {count} processes", kind_name(g.kind), g.unit)
+        };
+        glib::markup_escape_text(&format!("{head}{more}")).to_string()
+    } else if compact {
         // Collapsed: the one line carries the live numbers.
         format!("PID {} · {} · {}{more}", r.p.pid, fmt::pct(r.cpu()), fmt::bytes(r.mem() as f64))
     } else {
@@ -1216,14 +1459,21 @@ fn refresh_details(snap: &Snapshot) {
         .and_then(|t| t.format("%H:%M · %b %e").ok())
         .map(|s| s.to_string())
         .unwrap_or_else(|| "–".into());
+    // A group shows its processes added up; a priority only when they share one.
+    let procs: Vec<Proc> = match &r.group {
+        Some(g) => g.pids.iter().filter_map(|p| s.objects.get(p)).map(|o| o.row().p.clone()).collect(),
+        None => vec![r.p.clone()],
+    };
+    let nices: HashSet<i32> = procs.iter().map(|p| p.nice).collect();
+    let fds: u32 = procs.iter().map(|p| p.fds).sum();
     let vals = [
-        fmt::pct(r.p.cpu),
-        fmt::bytes(r.p.rss as f64),
-        fmt::rate(r.p.read_bps),
-        fmt::rate(r.p.write_bps),
-        r.p.threads.to_string(),
-        r.p.nice.to_string(),
-        if r.p.fds > 0 { r.p.fds.to_string() } else { "–".into() },
+        fmt::pct(procs.iter().map(|p| p.cpu).sum()),
+        fmt::bytes(procs.iter().map(|p| p.rss).sum::<u64>() as f64),
+        fmt::rate(procs.iter().map(|p| p.read_bps).sum()),
+        fmt::rate(procs.iter().map(|p| p.write_bps).sum()),
+        procs.iter().map(|p| p.threads).sum::<u32>().to_string(),
+        if nices.len() == 1 { nices.iter().next().map_or_else(String::new, i32::to_string) } else { "–".into() },
+        if fds > 0 { fds.to_string() } else { "–".into() },
         started,
     ];
     for (l, v) in d.values.iter().zip(vals) {
@@ -1238,7 +1488,8 @@ fn refresh_details(snap: &Snapshot) {
     d.close.set_visible(has_window);
 
     // Signals go to every selected process that isn't a kernel thread.
-    let live_sel: Vec<&ProcObject> = sel.iter().filter(|o| !o.row().p.kernel).collect();
+    let members = selected_procs(&s);
+    let live_sel: Vec<&ProcObject> = members.iter().filter(|o| !o.row().p.kernel).collect();
     let n = live_sel.len();
     let all_stopped = n > 0 && live_sel.iter().all(|o| o.row().p.state == 'T');
     let verb = if all_stopped { "Resume" } else { "Pause" };
@@ -1319,12 +1570,12 @@ fn context_menu(cv: &gtk::ColumnView) {
     let kill = add("kill", || end_selected(Signal::Kill));
     add("tree", || {
         if let Some(o) = state().and_then(|s| selected(&s.borrow()).first().cloned()) {
-            show_in_tree(o.row().p.pid);
+            show_in_tree(o.row().pid());
         }
     });
     add("location", || {
         if let Some(o) = state().and_then(|s| selected(&s.borrow()).first().cloned()) {
-            actions::open_location(o.row().p.pid);
+            actions::open_location(o.row().pid());
         }
     });
     add("copy", || {
@@ -1506,6 +1757,7 @@ fn update_titles(st: &State, snap: &Snapshot) {
 
 /// Wide enough for the details panel to sit beside the table.
 const DOCK_WIDTH: i32 = 1100;
+const DOCKED_PANEL: i32 = 380;
 
 fn set_docked(st: &State, docked: bool) {
     let Some(d) = &st.details else { return };
@@ -1521,10 +1773,21 @@ fn set_docked(st: &State, docked: bool) {
     } else {
         gtk::RevealerTransitionType::SlideUp
     });
+    // The table scrolls sideways, so it doesn't hold its width against the panel: docked,
+    // the panel has to ask for no more than its column, or it takes the table's room.
+    let per_line = if docked { 2 } else { 8 };
+    for flow in &d.flows {
+        flow.set_max_children_per_line(per_line);
+    }
+    // They still fill the panel; this only stops them asking for more.
+    let chars = if docked { 12 } else { -1 };
+    for l in [&d.title, &d.subtitle, &d.cmdline] {
+        l.set_max_width_chars(chars);
+    }
     if let Some(panel) = d.revealer.child() {
         if docked {
             panel.add_css_class("docked");
-            panel.set_size_request(380, -1);
+            panel.set_size_request(DOCKED_PANEL, -1);
         } else {
             panel.remove_css_class("docked");
             panel.set_size_request(-1, -1);
@@ -1559,6 +1822,15 @@ pub fn build(page: &Page) {
         chips.push((v, b));
     }
     toolbar.append(&chips_box);
+    let group_chip = gtk::Button::with_label("Group by app");
+    group_chip.add_css_class("chip");
+    group_chip.set_tooltip_text(Some("Put each app's or service's processes under one row"));
+    if p.group_processes {
+        group_chip.add_css_class("selected");
+    }
+    group_chip.set_visible(view == View::All);
+    group_chip.connect_clicked(|_| toggle_grouping());
+    toolbar.append(&group_chip);
     let search = gtk::SearchEntry::new();
     search.set_placeholder_text(Some("Filter by name, command, PID or user"));
     search.set_hexpand(true);
@@ -1684,6 +1956,11 @@ pub fn build(page: &Page) {
         query: String::new(),
         opened: HashSet::new(),
         closed: HashSet::new(),
+        grouped: p.group_processes,
+        group_chip,
+        group_ids: HashMap::new(),
+        next_group_id: -1,
+        opened_groups: HashSet::new(),
         bound: HashMap::new(),
         icons: HashMap::new(),
         search: search.clone(),
@@ -1771,17 +2048,18 @@ pub fn build(page: &Page) {
 /// closed or childless row moves to its parent.
 fn tree_key(open: bool) -> glib::Propagation {
     let Some(st) = state() else { return glib::Propagation::Proceed };
-    let (view, sel) = {
+    let (tree, sel) = {
         let s = st.borrow();
-        (s.view, selected(&s))
+        (is_tree(&s), selected(&s))
     };
-    if !matches!(view, View::Apps | View::Tree) || sel.len() != 1 {
+    if !tree || sel.len() != 1 {
         return glib::Propagation::Proceed;
     }
     let (pid, ppid, depth, has_children, expanded) = {
         let r = sel[0].row();
         (r.p.pid, r.p.ppid, r.depth, r.has_children, r.expanded)
     };
+    let ppid = parent_row(&st.borrow(), pid, ppid);
     if open {
         if has_children && !expanded {
             toggle_expanded(pid);
@@ -1804,6 +2082,75 @@ mod tests {
         let parents = HashMap::from([(10, 1), (100, 10), (20, 1), (1, 0), (7, 7)]);
         let got = with_ancestors(&HashSet::from([100, 7]), &parents);
         assert_eq!(got, HashSet::from([100, 10, 1, 0, 7]));
+    }
+
+    fn proc_row(pid: i32, name: &str, cpu: f64, kernel: bool) -> Row {
+        Row { p: Proc { pid, name: name.into(), cpu, rss: 1000, kernel, ..Default::default() }, ..Default::default() }
+    }
+
+    /// Firefox (-1) holds 10 and 11; 20 runs alone; 30 is a kernel thread.
+    fn sample() -> HashMap<i32, Row> {
+        let group = GroupRow { path: "/app-firefox.scope".into(), pids: vec![10, 11], leader: 10, ..Default::default() };
+        let header =
+            Row { p: Proc { pid: -1, name: "Firefox".into(), ..Default::default() }, group: Some(group), ..Default::default() };
+        [
+            header,
+            proc_row(10, "firefox", 5.0, false),
+            proc_row(11, "Web Content", 20.0, false),
+            proc_row(20, "foot", 1.0, false),
+            proc_row(30, "kworker", 0.0, true),
+        ]
+        .into_iter()
+        .map(|r| (r.p.pid, r))
+        .collect()
+    }
+
+    fn by_cpu(rows: &HashMap<i32, Row>) -> impl Fn(&i32, &i32) -> Ordering + '_ {
+        |a, b| compare(Col::Cpu, &rows[a], &rows[b]).reverse()
+    }
+
+    #[test]
+    fn groups_add_up_their_processes() {
+        let mut rows = sample();
+        let members = add_group_totals(&mut rows);
+        assert_eq!(members[&-1], vec![10, 11]);
+        let a = rows[&-1].agg.expect("group totals");
+        assert_eq!((a.count, a.cpu, a.mem), (2, 25.0, 2000));
+    }
+
+    #[test]
+    fn groups_start_closed() {
+        let mut rows = sample();
+        let members = add_group_totals(&mut rows);
+        let out = place_grouped(&rows, members, &HashSet::new(), "", false, by_cpu(&rows));
+        // The group (25%) sorts above foot (1%); its processes and the kernel thread are hidden.
+        let (shown, order, depth, has_children, expanded, agg) = out[&-1];
+        assert_eq!((shown, order, depth, has_children, expanded), (true, 0, 0, true, false));
+        assert_eq!(agg.map(|a| a.count), Some(2));
+        assert!(!out[&10].0 && !out[&11].0);
+        assert_eq!(out[&20].0, true);
+        assert!(!out.contains_key(&30));
+    }
+
+    #[test]
+    fn opened_groups_list_their_processes() {
+        let mut rows = sample();
+        let members = add_group_totals(&mut rows);
+        let opened = HashSet::from(["/app-firefox.scope".to_string()]);
+        let out = place_grouped(&rows, members, &opened, "", false, by_cpu(&rows));
+        assert_eq!((out[&11].0, out[&11].1, out[&11].2), (true, 1, 1));
+        assert_eq!((out[&10].0, out[&10].1), (true, 2));
+        assert_eq!(out[&20].1, 3);
+    }
+
+    #[test]
+    fn a_filter_opens_groups_to_their_matches() {
+        let mut rows = sample();
+        let members = add_group_totals(&mut rows);
+        let out = place_grouped(&rows, members, &HashSet::new(), "web", false, by_cpu(&rows));
+        assert!(out[&-1].0 && out[&-1].4);
+        assert!(out[&11].0 && !out[&10].0);
+        assert!(!out[&20].0);
     }
 
     #[test]
