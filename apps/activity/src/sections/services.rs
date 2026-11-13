@@ -511,6 +511,12 @@ fn show_details(user: bool, e: &Entry, after: Rc<dyn Fn()>) {
     );
 }
 
+/// Open Services with a unit's journal over it (from the Dashboard).
+pub fn open_logs(unit: &str, user: bool) {
+    window::navigate("services");
+    show_logs(unit, user);
+}
+
 /// The journal for one unit: newest at the bottom, optionally following live.
 fn show_logs(unit: &str, user: bool) {
     let (dialog, card) = widgets::dialog(&format!("Logs · {}", pretty_name(unit)), 860);

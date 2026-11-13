@@ -282,7 +282,7 @@ mod tests {
             item("Network", "traffic firefox", Target::Page("network")),
             item("my-firefox-helper", "", Target::Process(2)),
             item("firefox", "", Target::Process(1)),
-            item("Overview", "", Target::Page("overview")),
+            item("Dashboard", "", Target::Page("overview")),
         ];
         let got: Vec<String> = rank(&items, "Firefox").into_iter().map(|i| i.title).collect();
         assert_eq!(got, ["firefox", "my-firefox-helper", "Network"]);

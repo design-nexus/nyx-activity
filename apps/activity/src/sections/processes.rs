@@ -1053,6 +1053,21 @@ pub fn reveal(pid: i32) {
     refilter();
 }
 
+/// Open Processes sorted by a column ("cpu", "mem"), biggest first (from the Dashboard).
+pub fn show_sorted(column: &str) {
+    window::navigate("processes");
+    let Some(st) = state() else { return };
+    let (cv, c) = {
+        let s = st.borrow();
+        let col = COLUMNS.iter().find(|(_, id, ..)| *id == column).map(|(c, ..)| *c);
+        (s.view_widget.clone(), col.and_then(|col| s.columns.iter().find(|(x, _)| *x == col).map(|(_, c)| c.clone())))
+    };
+    if let Some(c) = c {
+        cv.sort_by_column(Some(&c), gtk::SortType::Descending);
+        cv.scroll_to(0, None, gtk::ListScrollFlags::NONE, None);
+    }
+}
+
 pub fn focus_search() {
     if let Some(st) = state() {
         let e = st.borrow().search.clone();

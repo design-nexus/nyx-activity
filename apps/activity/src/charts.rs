@@ -29,6 +29,15 @@ pub fn part_rgb(i: usize) -> Rgb {
     }
 }
 
+/// A swatch of the theme's by name ("blue"), or the accent when the theme has no such swatch.
+pub fn swatch(name: &str) -> Rgb {
+    theme::swatches()
+        .into_iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, c)| Rgb::hex(&c))
+        .unwrap_or_else(|| Rgb::hex(&theme::palette().accent))
+}
+
 fn set(cr: &cairo::Context, c: Rgb, a: f64) {
     cr.set_source_rgba(c.0, c.1, c.2, a);
 }

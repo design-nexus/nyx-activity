@@ -13,6 +13,8 @@ use std::rc::Rc;
 pub enum Tone {
     Accent,
     Second,
+    /// One of the theme's swatches by name ("blue"), for the Dashboard's cards.
+    Swatch(&'static str),
 }
 
 impl Tone {
@@ -22,14 +24,20 @@ impl Tone {
         match self {
             Tone::Accent => accent,
             Tone::Second => accent.mix(Rgb::hex(&p.danger), 0.55),
+            Tone::Swatch(name) => crate::charts::swatch(name),
         }
     }
 
     fn class(self) -> &'static str {
         match self {
-            Tone::Accent => "tone-accent",
+            Tone::Accent | Tone::Swatch(_) => "tone-accent",
             Tone::Second => "tone-second",
         }
+    }
+
+    /// How strongly the area under a line is filled.
+    fn fill(self) -> f64 {
+        if matches!(self, Tone::Swatch(_)) { 0.14 } else { 0.07 }
     }
 }
 
@@ -108,7 +116,7 @@ fn draw_lines(cr: &cairo::Context, w: f64, h: f64, cap: usize, data: &[(Vec<f64>
             }
             cr.line_to(w, h);
             cr.close_path();
-            set(cr, c, 0.07);
+            set(cr, c, tone.fill());
             let _ = cr.fill();
         }
         for (j, v) in values.iter().enumerate() {

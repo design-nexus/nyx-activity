@@ -5,9 +5,12 @@ Omarchy theme and fits a half-screen tile.
 
 ## What it does
 
-- **Overview:** tiles for CPU, memory, GPU, disk, network, temperature and battery,
-  each with a live graph, plus uptime, load and the busiest processes by CPU, memory,
-  disk or GPU. Choose which tiles show and in what order.
+- **Dashboard:** what needs a look comes first, in plain words with a button to deal
+  with it (a hot CPU, memory or a disk filling up, a process stuck busy, a failed
+  service). Then big cards: the CPU with a strip of every thread, memory split into
+  apps, kernel and cache, every disk's fullness, the network, the GPU, the sensors, the
+  busiest apps and what starts at login (battery and load average too, if you want
+  them). *Edit* shows, hides and drags the cards around, and sets when to warn.
 - **Processes:** every process with its CPU, memory, disk, GPU, threads and state.
   - **Views:** *Apps* (grouped under their window), *All*, *Tree* and *Mine*.
   - **Controls:** sort by any column, show, hide, resize or reorder columns (all
@@ -94,7 +97,7 @@ To remove it, run the same line with `uninstall.sh` in place of `install.sh`. Ad
 nyx-activity [--section ID] [--toggle]
 ```
 
-`--section` opens (or switches the open window to) `overview`, `processes`, `cpu`,
+`--section` opens (or switches the open window to) `dashboard`, `processes`, `cpu`,
 `memory`, `storage`, `network`, `gpu`, `sensors`, `startup`, `services` or `settings`.
 
 ## Files

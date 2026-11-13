@@ -69,7 +69,7 @@ pub fn build(page: &Page) {
 
     // ----- Warnings -----
     let g = page.group("Warnings");
-    g.note("Past these, values turn red, and alerts (below) can notify you.");
+    g.note("Past these, the Dashboard says so first thing, values turn red, and alerts (below) can notify you.");
     // Stored in °C; shown in the chosen unit.
     let f = p.fahrenheit;
     let to_unit = move |c: f64| if f { c * 9.0 / 5.0 + 32.0 } else { c };
@@ -102,6 +102,10 @@ pub fn build(page: &Page) {
     g.add(&r);
     let (r, _) = widgets::switch_row("Memory running out", "Past the memory warning above.", p.alert_mem, |on| {
         prefs::update(|p| p.alert_mem = on)
+    });
+    g.add(&r);
+    let (r, _) = widgets::switch_row("A disk filling up", "Past the disk warning above.", p.alert_disk, |on| {
+        prefs::update(|p| p.alert_disk = on)
     });
     g.add(&r);
     let (r, _) =

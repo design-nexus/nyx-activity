@@ -60,6 +60,10 @@ pub fn present(app: &gtk::Application, section: Option<&str>) {
     if let Some(pid) = std::env::var("NYX_ACTIVITY_REVEAL").ok().and_then(|p| p.parse().ok()) {
         live::ready(move |_| crate::sections::processes::reveal(pid));
     }
+    // Likewise, a test copy can open with the Dashboard's editor showing.
+    if std::env::var_os("NYX_ACTIVITY_EDIT").is_some() {
+        sections::dashboard::edit(true);
+    }
 }
 
 /// Our own symbolic icons (the icon theme may lack a CPU or memory glyph).
@@ -108,25 +112,35 @@ fn build(app: &gtk::Application) {
     // Labels inside expand; don't let that widen the sidebar itself.
     nav.set_hexpand(false);
     let mut compact_hide: Vec<gtk::Widget> = Vec::new();
+    let mut compact_show: Vec<gtk::Widget> = Vec::new();
+    let mut badges = Vec::new();
 
     let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let mut nav_items = HashMap::new();
     let mut last_group = "";
+    let mut labelled = 0;
     // Settings opens as a dialog from the top bar, so it has no nav item.
     for s in sections.iter().filter(|s| s.id != "settings") {
-        if s.group != last_group {
+        if s.group != last_group && !s.group.is_empty() {
+            // The first heading in the app's accent, System in violet. The icon rail shows
+            // a short bar in the colour where the heading was.
+            let section = match labelled {
+                0 => nyx_ui::sidebar::ACCENT_SECTION.to_string(),
+                _ => "swatch-violet".to_string(),
+            };
+            let bar = gtk::Separator::new(gtk::Orientation::Horizontal);
+            bar.add_css_class("nav-divider");
+            bar.add_css_class(&format!("section-{section}"));
+            bar.set_visible(false);
+            compact_show.push(bar.clone().upcast());
+            list.append(&bar);
             let g = widgets::label(&s.group.to_uppercase(), "nav-group");
-            let first = last_group.is_empty();
-            if first {
-                g.add_css_class("first");
-            }
-            // The first group in the app's accent, the others from the theme's [sections.activity].
-            let section = if first { nyx_ui::sidebar::ACCENT_SECTION.to_string() } else { s.group.to_lowercase() };
             nyx_ui::sidebar::set_section(&g, &section);
             compact_hide.push(g.clone().upcast());
             list.append(&g);
-            last_group = s.group;
+            labelled += 1;
         }
+        last_group = s.group;
         let button = gtk::Button::new();
         button.add_css_class("nav-item");
         let content = gtk::Box::new(gtk::Orientation::Horizontal, 12);
@@ -145,6 +159,15 @@ fn build(app: &gtk::Application) {
             content.append(&r);
             let r2 = r.clone();
             live::on_tick(&r, move |snap| r2.set_text(&readout(snap)));
+        }
+        if let Some(count) = s.badge {
+            let b = widgets::label("", "nav-readout");
+            b.add_css_class("badge");
+            b.add_css_class("tnum");
+            b.set_valign(gtk::Align::Center);
+            b.set_visible(false);
+            content.append(&b);
+            badges.push((b, count));
         }
         button.set_child(Some(&content));
         button.set_tooltip_text(Some(s.description));
@@ -176,14 +199,12 @@ fn build(app: &gtk::Application) {
     let collapse = widgets::bar_button("sidebar-show-symbolic", "Collapse the sidebar (Ctrl+B)");
     collapse.connect_clicked(|_| toggle_sidebar());
     header.start.append(&collapse);
+    header.center.append(&search_field());
     header.end.set_spacing(4);
-    header.end.append(&pause_button());
-    // The page's config files, beside search and settings.
-    let edit = widgets::hbox(0);
+    // The page's own buttons and config files, before the live pill and settings.
+    let edit = widgets::hbox(4);
     header.end.append(&edit);
-    let search = widgets::bar_button("system-search-symbolic", "Filter processes, or go to anything (Ctrl+F)");
-    search.connect_clicked(|_| find());
-    header.end.append(&search);
+    header.end.append(&pause_button());
     header.end.append(&chrome::settings_button(settings_dialog::open));
 
     let frame = nyx_ui::frame::AppFrame::new(&header.root);
@@ -249,13 +270,18 @@ fn build(app: &gtk::Application) {
                 toggle_pause();
                 glib::Propagation::Stop
             }
+            gdk::Key::Escape if current() == "overview" && sections::dashboard::editing() => {
+                sections::dashboard::edit(false);
+                glib::Propagation::Stop
+            }
             _ => glib::Propagation::Proceed,
         }
     });
     window.add_controller(keys);
 
     // Narrow windows (a tiled half-screen) get an icon-only sidebar.
-    SIDEBAR.with(|s| *s.borrow_mut() = Some(Sidebar { nav: nav.clone(), hide: compact_hide }));
+    SIDEBAR.with(|s| *s.borrow_mut() = Some(Sidebar { nav: nav.clone(), hide: compact_hide, show: compact_show, badges }));
+    crate::alerts::connect_failed(refresh_badges);
     let apply_width = {
         let nav = nav.clone();
         move |w: &gtk::ApplicationWindow| {
@@ -267,7 +293,7 @@ fn build(app: &gtk::Application) {
             }
             nav.add_css_class("sized");
             set_narrow(narrow);
-            apply_compact(narrow || prefs::get().sidebar_collapsed);
+            apply_compact(compact_wanted());
         }
     };
     let aw = apply_width.clone();
@@ -328,6 +354,10 @@ struct Sidebar {
     nav: gtk::Box,
     /// Hidden in the icon-only sidebar.
     hide: Vec<gtk::Widget>,
+    /// Shown only in the icon-only sidebar.
+    show: Vec<gtk::Widget>,
+    /// Badges and the counts they show (hidden at zero and in the icon rail).
+    badges: Vec<(gtk::Label, fn() -> u64)>,
 }
 
 thread_local! {
@@ -415,8 +445,51 @@ fn apply_compact(compact: bool) {
         for w in &s.hide {
             w.set_visible(!compact);
         }
+        for w in &s.show {
+            w.set_visible(compact);
+        }
         centre_icons(s.nav.upcast_ref(), compact);
     });
+    refresh_badges();
+}
+
+fn refresh_badges() {
+    SIDEBAR.with(|s| {
+        let s = s.borrow();
+        let Some(s) = s.as_ref() else { return };
+        let compact = s.nav.has_css_class("compact");
+        for (label, count) in &s.badges {
+            let n = count();
+            label.set_text(&n.to_string());
+            label.set_visible(n > 0 && !compact);
+        }
+    });
+}
+
+/// The Dashboard keeps its own choice of rail or full sidebar (a rail by default, so
+/// the cards get the room); the other pages share one.
+fn compact_wanted() -> bool {
+    let p = prefs::get();
+    NARROW.with(|n| n.get()) || if current() == "overview" { p.dashboard_rail } else { p.sidebar_collapsed }
+}
+
+/// The header's search: a field that opens Go to, with its key.
+fn search_field() -> gtk::Button {
+    let b = gtk::Button::new();
+    b.add_css_class("header-search");
+    let row = widgets::hbox(8);
+    row.append(&gtk::Image::from_icon_name("system-search-symbolic"));
+    let text = widgets::label("Find a process or page", "header-search-text");
+    text.set_hexpand(true);
+    text.set_xalign(0.0);
+    text.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    row.append(&text);
+    row.append(&widgets::label("Ctrl K", "key-hint"));
+    b.set_child(Some(&row));
+    b.set_tooltip_text(Some("Go to a page, process, service or startup item (Ctrl+K). Ctrl+F filters Processes."));
+    b.set_valign(gtk::Align::Center);
+    b.connect_clicked(|_| crate::palette::open());
+    b
 }
 
 fn centre_icons(w: &gtk::Widget, compact: bool) {
@@ -433,8 +506,12 @@ fn centre_icons(w: &gtk::Widget, compact: bool) {
 }
 
 pub fn toggle_sidebar() {
-    prefs::update(|p| p.sidebar_collapsed = !p.sidebar_collapsed);
-    apply_compact(NARROW.with(|n| n.get()) || prefs::get().sidebar_collapsed);
+    if current() == "overview" {
+        prefs::update(|p| p.dashboard_rail = !p.dashboard_rail);
+    } else {
+        prefs::update(|p| p.sidebar_collapsed = !p.sidebar_collapsed);
+    }
+    apply_compact(compact_wanted());
 }
 
 /// Mark pages for a narrow tiled window.
@@ -539,7 +616,7 @@ pub fn navigate(id: &str) {
             return;
         }
     }
-    let id = if id == "settings" { "overview" } else { id };
+    let id = if id == "settings" || id == "dashboard" { "overview" } else { id };
     let resolved = {
         let u = ui.borrow();
         u.sections.iter().find(|s| s.id == id).or_else(|| u.sections.first()).map(|s| s.id)
@@ -554,17 +631,26 @@ pub fn navigate(id: &str) {
         b.add_css_class("active");
     }
     u.stack.set_visible_child_name(id);
+    let changed = u.current != id;
     u.current = id;
     if let Some(s) = u.sections.iter().find(|s| s.id == id) {
         chrome::set_title(&u.window, "Activity", s.title);
-        u.header.set_subtitle(s.title);
+        // The Dashboard is the app's home: the header names only the app.
+        u.header.set_subtitle(if id == "overview" { "" } else { s.title });
         while let Some(c) = u.edit.first_child() {
             u.edit.remove(&c);
+        }
+        if let Some(button) = s.header {
+            u.edit.append(&button());
         }
         let files = (s.files)();
         if !files.is_empty() {
             u.edit.append(&widgets::config_button(&files));
         }
+    }
+    drop(u);
+    if changed {
+        apply_compact(compact_wanted());
     }
 }
 
@@ -615,17 +701,25 @@ pub fn current() -> &'static str {
 }
 
 thread_local! {
-    static PAUSE_BUTTONS: RefCell<Vec<gtk::Button>> = const { RefCell::new(Vec::new()) };
+    static PAUSE_BUTTONS: RefCell<Vec<(gtk::Button, gtk::Label, gtk::Box)>> = const { RefCell::new(Vec::new()) };
 }
 
-/// The live/paused pill in the header.
+/// The live/paused pill in the header: a green dot while live.
 fn pause_button() -> gtk::Button {
     let b = gtk::Button::new();
     b.add_css_class("chip");
     b.add_css_class("live-pill");
+    let row = widgets::hbox(7);
+    let dot = widgets::hbox(0);
+    dot.add_css_class("live-dot");
+    dot.set_valign(gtk::Align::Center);
+    let label = widgets::label("", "");
+    row.append(&dot);
+    row.append(&label);
+    b.set_child(Some(&row));
     b.set_tooltip_text(Some("Pause or resume updates (Ctrl+P)"));
     b.connect_clicked(|_| toggle_pause());
-    PAUSE_BUTTONS.with(|p| p.borrow_mut().push(b.clone()));
+    PAUSE_BUTTONS.with(|p| p.borrow_mut().push((b.clone(), label, dot)));
     refresh_pause();
     b
 }
@@ -635,8 +729,9 @@ pub fn refresh_pause() {
     let secs = prefs::get().interval_ms as f64 / 1000.0;
     let label = if paused { "Paused".to_string() } else { format!("Live · {secs} s") };
     PAUSE_BUTTONS.with(|p| {
-        for b in p.borrow().iter() {
-            b.set_label(&label);
+        for (b, l, dot) in p.borrow().iter() {
+            l.set_text(&label);
+            dot.set_visible(!paused);
             if paused {
                 b.add_css_class("paused");
             } else {

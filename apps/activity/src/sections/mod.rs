@@ -6,10 +6,10 @@ use crate::{fmt, paths};
 use std::path::PathBuf;
 
 pub mod cpu;
+pub mod dashboard;
 pub mod gpu;
 pub mod memory;
 pub mod network;
-pub mod overview;
 pub mod processes;
 pub mod sensors;
 pub mod services;
@@ -33,34 +33,41 @@ pub struct Section {
     pub readout: Option<fn(&Snapshot) -> String>,
     /// The page manages its own scrolling (tables).
     pub fill: bool,
+    /// The page's own button for the header.
+    pub header: Option<fn() -> gtk::Widget>,
+    /// A count to call attention to, as a badge beside the page's name.
+    pub badge: Option<fn() -> u64>,
 }
 
 pub fn all() -> Vec<Section> {
     vec![
-        // ----- Monitor -----
         Section {
             id: "overview",
-            title: "Overview",
+            title: "Dashboard",
             icon: "view-grid-symbolic",
-            group: "Monitor",
-            description: "Everything at a glance: usage, temperatures and the busiest processes.",
-            keywords: "dashboard summary glance top",
+            group: "",
+            description: "What needs a look, then cards for everything: CPU, memory, disks, network, GPU, sensors and the busiest apps.",
+            keywords: "overview dashboard summary glance top problems warnings cards",
             files: Vec::new,
-            build: overview::build,
+            build: dashboard::build,
             readout: None,
-            fill: false,
+            fill: true,
+            header: Some(dashboard::header_button),
+            badge: None,
         },
         Section {
             id: "processes",
             title: "Processes",
             icon: "utilities-system-monitor-symbolic",
-            group: "Monitor",
+            group: "",
             description: "Every running program. End, pause or reprioritize any of them.",
             keywords: "tasks apps kill end terminate stop signal nice priority pid tree",
             files: Vec::new,
             build: processes::build,
             readout: Some(|s| if s.process_count > 0 { s.process_count.to_string() } else { String::new() }),
             fill: true,
+            header: None,
+            badge: None,
         },
         // ----- Performance -----
         Section {
@@ -74,6 +81,8 @@ pub fn all() -> Vec<Section> {
             build: cpu::build,
             readout: Some(|s| fmt::pct(s.cpu.usage)),
             fill: false,
+            header: None,
+            badge: None,
         },
         Section {
             id: "memory",
@@ -88,6 +97,8 @@ pub fn all() -> Vec<Section> {
                 |s| if s.mem.total > 0 { fmt::pct(s.mem.used as f64 / s.mem.total as f64 * 100.0) } else { String::new() },
             ),
             fill: false,
+            header: None,
+            badge: None,
         },
         Section {
             id: "storage",
@@ -100,6 +111,8 @@ pub fn all() -> Vec<Section> {
             build: storage::build,
             readout: Some(|s| fmt::pct(s.disk_busy())),
             fill: false,
+            header: None,
+            badge: None,
         },
         Section {
             id: "network",
@@ -112,6 +125,8 @@ pub fn all() -> Vec<Section> {
             build: network::build,
             readout: Some(|s| format!("↓ {}", crate::fmt::net_rate(s.net_rx()))),
             fill: false,
+            header: None,
+            badge: None,
         },
         Section {
             id: "gpu",
@@ -131,6 +146,8 @@ pub fn all() -> Vec<Section> {
                     .unwrap_or_default()
             }),
             fill: false,
+            header: None,
+            badge: None,
         },
         Section {
             id: "sensors",
@@ -143,6 +160,8 @@ pub fn all() -> Vec<Section> {
             build: sensors::build,
             readout: Some(|s| s.sensors.cpu_temp.map(fmt::temp).unwrap_or_default()),
             fill: false,
+            header: None,
+            badge: None,
         },
         // ----- System -----
         Section {
@@ -156,6 +175,8 @@ pub fn all() -> Vec<Section> {
             build: startup::build,
             readout: None,
             fill: false,
+            header: None,
+            badge: None,
         },
         Section {
             id: "services",
@@ -168,6 +189,8 @@ pub fn all() -> Vec<Section> {
             build: services::build,
             readout: None,
             fill: true,
+            header: None,
+            badge: Some(|| crate::alerts::failed().len() as u64),
         },
         // ----- App -----
         Section {
@@ -181,6 +204,8 @@ pub fn all() -> Vec<Section> {
             build: settings::build,
             readout: None,
             fill: false,
+            header: None,
+            badge: None,
         },
     ]
 }

@@ -40,10 +40,12 @@ pub struct Prefs {
     /// Processes sort column id and direction.
     pub sort_column: String,
     pub sort_desc: bool,
-    /// Overview tiles to show, in order: cpu, mem, gpu, disk, net, temp, bat.
-    pub overview_tiles: Vec<String>,
-    /// The metric each "Busiest processes" card ranks by: cpu, mem, disk or gpu.
-    pub overview_top: Vec<String>,
+    /// Dashboard cards in order, by id (see `dashboard::CARDS`); ones missing go at the end.
+    pub dashboard_order: Vec<String>,
+    /// Dashboard cards turned off.
+    pub dashboard_hidden: Vec<String>,
+    /// The sidebar is an icon rail on the Dashboard, whatever the window width.
+    pub dashboard_rail: bool,
     /// The CPU page shows each thread as a small tile instead of a graph.
     pub cpu_grid: bool,
     /// Expanded diagnostic groups and selected consumer views, keyed by page/device.
@@ -53,10 +55,11 @@ pub struct Prefs {
     pub warn_temp: f64,
     pub warn_mem: f64,
     pub warn_disk: f64,
-    /// Desktop notifications: CPU temperature and memory past their warning
+    /// Desktop notifications: CPU temperature, memory and a disk past their warning
     /// thresholds, a process over `alert_proc_cpu`% for `alert_proc_secs`, a failed service.
     pub alert_temp: bool,
     pub alert_mem: bool,
+    pub alert_disk: bool,
     pub alert_proc: bool,
     pub alert_proc_cpu: f64,
     pub alert_proc_secs: u64,
@@ -93,8 +96,9 @@ impl Default for Prefs {
             column_order: Vec::new(),
             sort_column: "cpu".into(),
             sort_desc: true,
-            overview_tiles: ["cpu", "mem", "gpu", "disk", "net", "temp", "bat"].map(String::from).to_vec(),
-            overview_top: vec!["cpu".into(), "mem".into()],
+            dashboard_order: Vec::new(),
+            dashboard_hidden: vec!["battery".into(), "load".into()],
+            dashboard_rail: true,
             cpu_grid: false,
             expanded_groups: Default::default(),
             consumer_views: Default::default(),
@@ -103,6 +107,7 @@ impl Default for Prefs {
             warn_disk: 95.0,
             alert_temp: false,
             alert_mem: false,
+            alert_disk: false,
             alert_proc: false,
             alert_proc_cpu: 50.0,
             alert_proc_secs: 30,

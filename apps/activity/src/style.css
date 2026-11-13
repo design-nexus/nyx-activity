@@ -29,13 +29,14 @@ window.activity-window .app-header menubutton.bar-button > button:hover {
   color: @theme_text;
 }
 
-/* Live or paused: a quiet chip; paused takes the danger tint. */
+/* Live or paused: a quiet field with a green dot; paused takes the danger tint. */
 window.activity-window button.live-pill {
-  min-height: 26px;
+  min-height: 28px;
   padding: 0 10px;
   margin-right: 4px;
-  background: transparent;
-  font-size: 11.5px;
+  background: @field;
+  box-shadow: inset 0 0 0 1px @hairline;
+  font-size: 12px;
   font-weight: 500;
   color: @theme_dim_text;
   font-feature-settings: "tnum";
@@ -48,7 +49,59 @@ window.activity-window button.live-pill:hover {
 
 window.activity-window button.live-pill.paused {
   background: alpha(@theme_danger, 0.12);
+  box-shadow: none;
   color: @theme_danger;
+}
+
+.live-dot {
+  min-width: 7px;
+  min-height: 7px;
+  border-radius: 999px;
+  background: @theme_success;
+  box-shadow: 0 0 0 3px alpha(@theme_success, 0.22);
+}
+
+/* The header's search: a field that opens Go to. */
+window.activity-window .app-header button.header-search {
+  min-width: 320px;
+  min-height: 28px;
+  padding: 0 8px 0 10px;
+  border: none;
+  border-radius: var(--nyx-radius-small);
+  background: @field;
+  box-shadow: none;
+  color: @theme_text_tertiary;
+}
+
+window.activity-window .app-header button.header-search:hover {
+  background: alpha(@theme_text, 0.06);
+}
+
+.header-search image {
+  -gtk-icon-size: 14px;
+}
+
+.header-search-text {
+  font-size: 12.5px;
+  font-weight: 400;
+}
+
+.header-search .key-hint {
+  font-size: 11px;
+  color: @theme_text_tertiary;
+}
+
+window.activity-window .app-header button.bar-button.dash-edit {
+  padding: 0 10px;
+  font-weight: 500;
+}
+
+/* The icon rail's mark where a group starts: a short bar in its colour. */
+.settings-navigation separator.nav-divider {
+  margin: 8px 14px 6px;
+  min-height: 2px;
+  border-radius: 1px;
+  background: @theme_divider;
 }
 
 .settings-navigation .nav-group {
@@ -94,10 +147,6 @@ window.activity-window button.group-action {
   min-height: 26px;
   min-width: 26px;
   padding: 0 4px;
-}
-
-.tile-editor {
-  min-width: 220px;
 }
 
 .priority-custom {
@@ -153,20 +202,6 @@ window.activity-window dropdown > button {
 
 .group-list.bare flowboxchild {
   padding: 0;
-}
-
-window.activity-window button.stat-tile {
-  padding: 12px 14px 10px;
-  border: none;
-  border-radius: var(--nyx-radius-card);
-  background: @theme_card;
-  box-shadow: none;
-  min-width: 150px;
-  transition: background 120ms ease-out;
-}
-
-window.activity-window button.stat-tile:hover {
-  background: mix(@theme_card, @theme_text, 0.04);
 }
 
 .stat-title {
@@ -700,4 +735,261 @@ window.activity-window button.ranking-more {
 window.activity-window .settings-page.fill,
 window.activity-window .settings-page.fill.narrow {
   padding: 0;
+}
+
+/* ---------- Dashboard ---------- */
+
+.dash-alerts {
+  margin: 12px 14px 0;
+}
+
+.dash-alert {
+  padding: 10px 12px 10px 14px;
+  border-radius: var(--nyx-radius-card);
+  background: @theme_card;
+}
+
+.dash-alert.warn {
+  background: mix(@theme_bg, @theme_warning, 0.1);
+  box-shadow: inset 0 0 0 1px alpha(@theme_warning, 0.28);
+}
+
+.dash-alert.bad {
+  background: mix(@theme_bg, @theme_danger, 0.09);
+  box-shadow: inset 0 0 0 1px alpha(@theme_danger, 0.25);
+}
+
+.dash-alert-icon {
+  -gtk-icon-size: 18px;
+  color: @theme_dim_text;
+}
+
+.dash-alert.warn .dash-alert-icon { color: @theme_warning; }
+
+.dash-alert.bad .dash-alert-icon { color: @theme_danger; }
+
+.dash-alert-title {
+  font-weight: 600;
+}
+
+.dash-alert-detail {
+  font-size: 12px;
+  color: @theme_dim_text;
+}
+
+window.activity-window button.dash-alert-action {
+  min-height: 26px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.dash-grid {
+  margin: 12px 14px 14px;
+}
+
+.dash-card {
+  padding: 12px 14px;
+  border: 1px solid @hairline;
+  border-radius: var(--nyx-radius-card);
+  background: @theme_card;
+}
+
+.dash-card.editing {
+  border: 1px dashed alpha(@theme_accent, 0.5);
+}
+
+.dash-card.drop-here {
+  background: mix(@theme_card, @theme_accent, 0.1);
+}
+
+.dash-head {
+  min-height: 22px;
+}
+
+.dash-icon {
+  -gtk-icon-size: 15px;
+  color: @theme_accent;
+}
+
+.dash-grip {
+  -gtk-icon-size: 14px;
+  color: @theme_text_tertiary;
+}
+
+.dash-title {
+  font-weight: 600;
+}
+
+.dash-meta {
+  font-size: 11px;
+  color: @theme_text_tertiary;
+}
+
+window.activity-window button.dash-more {
+  min-height: 22px;
+  padding: 0 4px;
+  margin: -4px -4px -4px 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  font-size: 12px;
+  font-weight: 500;
+  color: @theme_accent;
+}
+
+window.activity-window button.dash-more:hover {
+  background: alpha(@theme_accent, 0.1);
+}
+
+window.activity-window button.dash-hide {
+  min-height: 24px;
+  min-width: 24px;
+  margin: -4px -6px -4px 0;
+}
+
+.dash-value {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+.dash-value.warning-text {
+  color: @theme_warning;
+}
+
+.dash-sub,
+.dash-foot,
+.dash-key,
+.dash-mount-value {
+  font-size: 11.5px;
+  color: @theme_dim_text;
+}
+
+.dash-mount,
+.dash-sensor {
+  font-size: 12px;
+}
+
+.dash-sensor {
+  padding: 2px 0;
+}
+
+.dash-sensor-name {
+  color: @theme_dim_text;
+}
+
+.dash-sensor-value {
+  font-weight: 500;
+}
+
+window.activity-window button.dash-app {
+  min-height: 30px;
+  padding: 0 4px;
+  margin: 0 -4px;
+  border-radius: var(--nyx-radius-small);
+  background: transparent;
+  box-shadow: none;
+}
+
+window.activity-window button.dash-app:hover {
+  background: @row_hover;
+}
+
+.dash-app-name {
+  font-size: 12.5px;
+  font-weight: 400;
+}
+
+.dash-app-value {
+  font-size: 12px;
+  color: @theme_dim_text;
+}
+
+/* The swatch class sets the colour; the tile wears it. */
+.app-letter {
+  min-width: 22px;
+  min-height: 22px;
+  border-radius: 6px;
+  background-color: currentColor;
+}
+
+.app-letter > label {
+  color: white;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.dash-startup-item {
+  font-size: 12.5px;
+  color: @theme_dim_text;
+}
+
+/* The editor beside the cards. */
+.dash-editor {
+  border-left: 1px solid @divider;
+}
+
+.dash-editor-head {
+  padding: 14px 16px 8px;
+}
+
+.dash-editor-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.dash-editor-hint {
+  font-size: 12px;
+  color: @theme_dim_text;
+}
+
+.dash-editor-body {
+  padding: 0 16px 12px;
+}
+
+.dash-editor-label {
+  margin: 16px 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: @theme_text_tertiary;
+}
+
+.dash-editor-body > .dash-editor-label:first-child {
+  margin-top: 4px;
+}
+
+.dash-editor-card {
+  border: 1px solid @hairline;
+  border-radius: var(--nyx-radius-card);
+  background: @theme_card;
+}
+
+.dash-editor-row {
+  min-height: 34px;
+  padding: 2px 12px;
+}
+
+.dash-editor-row switch {
+  margin: -3px 0;
+}
+
+.dash-editor-row + .dash-editor-row {
+  border-top: 1px solid @hairline;
+}
+
+.dash-editor-key {
+  font-size: 12.5px;
+  color: @theme_dim_text;
+}
+
+.dash-editor-row dropdown > button {
+  min-height: 24px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.dash-editor-foot {
+  padding: 10px 16px;
+  border-top: 1px solid @divider;
 }

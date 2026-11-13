@@ -444,7 +444,7 @@ fn xdg_row(e: &XdgEntry, units: &HashMap<&str, &Unit>, blame: &HashMap<String, f
     item_row(&e.icon, &e.name, &e.comment, &e.exec, &tags, &controls)
 }
 
-fn short_time(secs: f64) -> String {
+pub fn short_time(secs: f64) -> String {
     if secs < 1.0 {
         format!("{} ms", (secs * 1000.0).round())
     } else if secs < 60.0 {
@@ -455,7 +455,7 @@ fn short_time(secs: f64) -> String {
 }
 
 /// "app-dropbox@autostart.service" -> "dropbox"; "foo.service" -> "foo".
-fn pretty_unit(unit: &str) -> String {
+pub fn pretty_unit(unit: &str) -> String {
     let u = unit.trim_end_matches(".service");
     let u = u.strip_prefix("app-").and_then(|s| s.strip_suffix("@autostart")).unwrap_or(u);
     startup::unescape(u)

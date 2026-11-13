@@ -26,7 +26,7 @@ const APP_ID: &str = "io.github.design_nexus.nyx.Activity";
 
 const USAGE: &str = "Usage: nyx-activity [--section ID] [--toggle]\n\
 \n\
-  --section ID   open (or switch the open window) to a page: overview, processes, cpu,\n\
+  --section ID   open (or switch the open window) to a page: dashboard, processes, cpu,\n\
                  memory, storage, network, gpu, sensors, startup, services, settings\n\
   --toggle       close the window if it's open, otherwise open it (for a keybinding)\n\
   --top cpu|memory  print the busiest processes and the totals as JSON, then exit\n";

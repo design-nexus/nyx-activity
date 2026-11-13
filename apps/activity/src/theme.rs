@@ -11,7 +11,7 @@ pub fn install() {
         window_class: "activity-window",
         base_skip: &[],
         css: include_str!("style.css"),
-        no_glow_css: "\n.settings-option.search-hit, .theme-card.selected, .toast, .stat-tile.selected { box-shadow: 0 0 0 1px alpha(@theme_accent, 0.6); }\n\
+        no_glow_css: "\n.settings-option.search-hit, .theme-card.selected, .toast { box-shadow: 0 0 0 1px alpha(@theme_accent, 0.6); }\n\
              window.activity-window scale > trough > slider { box-shadow: 0 0 0 1px alpha(@theme_accent, 0.72); }\n",
         extra_colors: None,
         prefs: || {
