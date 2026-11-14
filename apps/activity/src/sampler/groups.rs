@@ -111,9 +111,9 @@ pub fn groups(procs: &[Proc]) -> Vec<Group> {
             // The session's own cgroup: Hyprland and everything its config starts.
             "Hyprland".to_string()
         } else if WRAPPERS.contains(&leader.name.as_str()) {
-            biggest.name.clone()
+            biggest.app_name()
         } else {
-            leader.name.clone()
+            leader.app_name()
         };
         let stat = read(&format!("/sys/fs/cgroup{cg}/memory.stat"));
         let (mem, cache) = if stat.is_empty() {

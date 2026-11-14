@@ -21,6 +21,8 @@ struct Live {
     subs: Vec<(glib::WeakRef<gtk::Widget>, Callback)>,
     control: Option<Arc<Control>>,
     tracked: HashSet<i32>,
+    /// Apps and services (by cgroup path) whose added-up CPU and memory are kept.
+    tracked_groups: HashSet<String>,
     pending: Vec<Pending>,
     /// Called with every snapshot, on screen or not (alerts).
     always: Vec<Callback>,
@@ -100,6 +102,11 @@ pub fn history(key: &str) -> Vec<f64> {
 /// Keep a per-process CPU and memory history for `pid` (the details panel).
 pub fn track(pid: i32) {
     LIVE.with(|l| l.borrow_mut().tracked.insert(pid));
+}
+
+/// Keep an app's or service's CPU and memory history (`group.<path>.cpu`, `.mem`).
+pub fn track_group(path: &str) {
+    LIVE.with(|l| l.borrow_mut().tracked_groups.insert(path.to_string()));
 }
 
 /// Run `f` once with the first snapshot (right away if one has arrived). Pages
@@ -182,7 +189,7 @@ fn push(history: &mut HashMap<String, VecDeque<f64>>, cap: usize, key: String, v
     }
 }
 
-fn record(history: &mut HashMap<String, VecDeque<f64>>, tracked: &HashSet<i32>, s: &Snapshot) {
+fn record(history: &mut HashMap<String, VecDeque<f64>>, tracked: &HashSet<i32>, groups: &HashSet<String>, s: &Snapshot) {
     let cap = capacity();
     let mut put = |k: String, v: f64| push(history, cap, k, v);
     put("cpu".into(), s.cpu.usage);
@@ -275,6 +282,10 @@ fn record(history: &mut HashMap<String, VecDeque<f64>>, tracked: &HashSet<i32>, 
             put(format!("proc.{}.mem", p.pid), p.rss as f64);
         }
     }
+    for g in s.groups.iter().filter(|g| groups.contains(&g.path)) {
+        put(format!("group.{}.cpu", g.path), g.cpu);
+        put(format!("group.{}.mem", g.path), g.memory() as f64);
+    }
 }
 
 fn receive(snap: Snapshot) {
@@ -282,7 +293,8 @@ fn receive(snap: Snapshot) {
     let pending = LIVE.with(|l| {
         let mut l = l.borrow_mut();
         let tracked = l.tracked.clone();
-        record(&mut l.history, &tracked, &snap);
+        let groups = l.tracked_groups.clone();
+        record(&mut l.history, &tracked, &groups, &snap);
         // Keep the details graphs' pids only while they're alive.
         if let Some(procs) = &snap.procs {
             let alive: HashSet<i32> = procs.iter().map(|p| p.pid).collect();
@@ -291,6 +303,13 @@ fn receive(snap: Snapshot) {
                 l.tracked.remove(&pid);
                 l.history.remove(&format!("proc.{pid}.cpu"));
                 l.history.remove(&format!("proc.{pid}.mem"));
+            }
+            let live: HashSet<&str> = snap.groups.iter().map(|g| g.path.as_str()).collect();
+            let gone: Vec<String> = l.tracked_groups.iter().filter(|p| !live.contains(p.as_str())).cloned().collect();
+            for path in gone {
+                l.tracked_groups.remove(&path);
+                l.history.remove(&format!("group.{path}.cpu"));
+                l.history.remove(&format!("group.{path}.mem"));
             }
         }
         l.latest = Some(snap.clone());

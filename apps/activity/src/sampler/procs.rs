@@ -37,6 +37,16 @@ pub struct Proc {
     pub gpu_mem: u64,
 }
 
+impl Proc {
+    /// A name for the app a process belongs to. A process can rename itself after its
+    /// role or thread ("Web Content", "MainThread"); then it's the program's file name.
+    pub fn app_name(&self) -> String {
+        let threadish = self.name.ends_with("Thread") || self.name.contains(' ');
+        let program = self.cmdline.split_whitespace().next().and_then(|a| a.rsplit('/').next()).unwrap_or("");
+        if threadish && !program.is_empty() { program.to_string() } else { self.name.clone() }
+    }
+}
+
 /// Fields of `/proc/[pid]/stat` we use.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Stat {
@@ -288,6 +298,12 @@ impl ProcSampler {
                             name = full;
                         }
                     }
+                    // A process named after its main thread ("MainThread") goes by its program.
+                    if name.ends_with("Thread")
+                        && let Some(program) = args.first().and_then(|a| a.rsplit('/').next()).filter(|p| !p.is_empty())
+                    {
+                        name = program.to_string();
+                    }
                     let cgroup = read(&format!("{base}/cgroup"))
                         .lines()
                         .find_map(|l| l.strip_prefix("0::"))
@@ -387,6 +403,15 @@ impl ProcSampler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_programs_not_threads() {
+        let p = |name: &str, cmdline: &str| Proc { name: name.into(), cmdline: cmdline.into(), ..Default::default() };
+        assert_eq!(p("MainThread", "/opt/cursor-agent/bin/cursor-agent --use-x").app_name(), "cursor-agent");
+        assert_eq!(p("Web Content", "/usr/lib/firefox/firefox -contentproc").app_name(), "firefox");
+        assert_eq!(p("blender", "blender scene.blend").app_name(), "blender");
+        assert_eq!(p("MainThread", "").app_name(), "MainThread");
+    }
 
     #[test]
     fn parses_stat_with_odd_names() {

@@ -866,13 +866,18 @@ fn sensors_card() -> Card {
     c
 }
 
+/// The swatch an app's letter tile takes, the same every time for its name.
+pub(crate) fn app_swatch(name: &str) -> &'static str {
+    let h = name.bytes().fold(0usize, |a, b| a.wrapping_mul(31).wrapping_add(b as usize));
+    APP_SWATCHES[h % APP_SWATCHES.len()]
+}
+
 /// A square in a swatch picked by the app's name, with its first letter.
 fn letter_tile(name: &str) -> gtk::Box {
     let tile = widgets::hbox(0);
     tile.add_css_class("app-letter");
-    let h = name.bytes().fold(0usize, |a, b| a.wrapping_mul(31).wrapping_add(b as usize));
     // The swatch's class sets `color`, which the tile's CSS paints as its background.
-    tile.add_css_class(&format!("section-swatch-{}", APP_SWATCHES[h % APP_SWATCHES.len()]));
+    tile.add_css_class(&format!("section-swatch-{}", app_swatch(name)));
     tile.set_valign(gtk::Align::Center);
     tile.set_halign(gtk::Align::Start);
     tile.set_hexpand(false);
@@ -884,7 +889,7 @@ fn letter_tile(name: &str) -> gtk::Box {
 }
 
 /// 2140 → "2,140".
-fn thousands(n: u64) -> String {
+pub(crate) fn thousands(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {

@@ -75,6 +75,8 @@ fn install_icons() {
         ("activity-gpu-symbolic.svg", include_str!("../data/icons/activity-gpu-symbolic.svg")),
         ("activity-thermometer-symbolic.svg", include_str!("../data/icons/activity-thermometer-symbolic.svg")),
         ("activity-processes-symbolic.svg", include_str!("../data/icons/activity-processes-symbolic.svg")),
+        ("activity-filter-symbolic.svg", include_str!("../data/icons/activity-filter-symbolic.svg")),
+        ("activity-window-symbolic.svg", include_str!("../data/icons/activity-window-symbolic.svg")),
     ];
     let dir = crate::paths::cache_dir().join("icons");
     for (name, svg) in ICONS {
@@ -382,8 +384,8 @@ pub const SHORTCUTS: &[(&[&str], &str)] = &[
     (&["/"], "Filter processes (from the process list)"),
     (&["Ctrl", "P"], "Pause or resume updates"),
     (&["Ctrl", "B"], "Collapse or expand the sidebar"),
-    (&["Enter"], "Open a group, or switch to the process's window"),
-    (&["← / →"], "Close or open a branch in Apps and Tree"),
+    (&["Enter"], "Open an app to its processes, or switch to the process's window"),
+    (&["← / →"], "Close or open an app, or a branch of the process tree"),
     (&["Delete"], "End the selected processes"),
     (&["Shift", "Delete"], "Kill the selected processes"),
     (&["Right-click"], "Actions for a process, or export a graph"),

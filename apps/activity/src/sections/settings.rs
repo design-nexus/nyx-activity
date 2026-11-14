@@ -141,7 +141,7 @@ pub fn build(page: &Page) {
     g.add(&r);
     let (r, _) = widgets::switch_row(
         "Show kernel threads",
-        "List the kernel's own workers (kworker, ksoftirqd…) in All and Tree.",
+        "List the kernel's own workers (kworker, ksoftirqd…) in All, and under System in Apps.",
         p.kernel_threads,
         |on| {
             prefs::update(|p| p.kernel_threads = on);

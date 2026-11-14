@@ -29,10 +29,14 @@ pub struct Prefs {
     pub pause_hidden: bool,
     /// Columns hidden in Processes.
     pub hidden_columns: Vec<String>,
-    /// Processes view: apps, all, tree or mine.
+    /// Processes view: apps, all or mine.
     pub process_view: String,
-    /// All: each app's or service's processes under one row.
-    pub group_processes: bool,
+    /// All and Mine: processes indented under the ones that started them.
+    pub process_tree: bool,
+    /// 2 once Processes moved to apps first (the columns and view were reset to its defaults).
+    /// Missing from older files, so it reads as 0 there rather than the default.
+    #[serde(default)]
+    pub processes_layout: u32,
     /// Processes column widths in pixels, by column id.
     pub column_widths: std::collections::HashMap<String, i32>,
     /// Processes column order, by column id.
@@ -64,8 +68,6 @@ pub struct Prefs {
     pub alert_proc_cpu: f64,
     pub alert_proc_secs: u64,
     pub alert_services: bool,
-    /// The process details panel shows only its head line.
-    pub details_compact: bool,
     /// Services page: "user" or "system".
     pub services_scope: String,
     /// Services page: list timers instead of services.
@@ -89,9 +91,10 @@ impl Default for Prefs {
             confirm_kill: true,
             kernel_threads: false,
             pause_hidden: true,
-            hidden_columns: vec!["threads".into(), "state".into()],
-            process_view: "all".into(),
-            group_processes: true,
+            hidden_columns: DEFAULT_HIDDEN.iter().map(|c| c.to_string()).collect(),
+            process_view: "apps".into(),
+            process_tree: false,
+            processes_layout: PROCESSES_LAYOUT,
             column_widths: Default::default(),
             column_order: Vec::new(),
             sort_column: "cpu".into(),
@@ -112,7 +115,6 @@ impl Default for Prefs {
             alert_proc_cpu: 50.0,
             alert_proc_secs: 30,
             alert_services: false,
-            details_compact: false,
             services_scope: "user".into(),
             services_timers: false,
             services_show: "all".into(),
@@ -120,4 +122,41 @@ impl Default for Prefs {
     }
 }
 
+/// Processes columns hidden by default: Name, CPU, Memory, Disk and Network show.
+pub const DEFAULT_HIDDEN: &[&str] = &["pid", "user", "gpu", "threads", "state"];
+pub const PROCESSES_LAYOUT: u32 = 2;
+
+impl Prefs {
+    /// Settings saved before Processes put apps first: its columns and view go to the new
+    /// defaults once (the old Tree view is All indented by parent).
+    pub fn migrate_processes(&mut self) -> bool {
+        if self.processes_layout >= PROCESSES_LAYOUT {
+            return false;
+        }
+        self.processes_layout = PROCESSES_LAYOUT;
+        self.process_tree = self.process_view == "tree";
+        self.process_view = if self.process_tree { "all".into() } else { "apps".into() };
+        self.hidden_columns = DEFAULT_HIDDEN.iter().map(|c| c.to_string()).collect();
+        self.column_order.clear();
+        self.column_widths.clear();
+        true
+    }
+}
+
 nyx_core::prefs_store!(Prefs);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_processes_settings_move_once() {
+        let mut p = Prefs { processes_layout: 0, process_view: "tree".into(), hidden_columns: vec![], ..Default::default() };
+        assert!(p.migrate_processes());
+        assert_eq!((p.process_view.as_str(), p.process_tree), ("all", true));
+        assert_eq!(p.hidden_columns, DEFAULT_HIDDEN);
+        p.process_view = "mine".into();
+        assert!(!p.migrate_processes());
+        assert_eq!(p.process_view, "mine");
+    }
+}

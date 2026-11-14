@@ -505,22 +505,9 @@ window.activity-window columnview > header > button:hover > box > label {
   color: @theme_text;
 }
 
-/* Busy cells get a stronger accent wash, five steps. */
 .cell-num {
-  padding: 1px 5px;
-  border-radius: 4px;
   font-feature-settings: "tnum";
 }
-
-.cell-num.heat-1 { background: transparent; }
-
-.cell-num.heat-2 { background: transparent; }
-
-.cell-num.heat-3 { background: transparent; }
-
-.cell-num.heat-4 { background: alpha(@theme_accent, 0.28); font-weight: 600; }
-
-.cell-num.heat-5 { background: alpha(@theme_accent, 0.38); font-weight: 600; color: @theme_text; }
 
 .cell-dim {
   color: @theme_dim_text;
@@ -546,24 +533,6 @@ window.activity-window button.tree-expander:hover {
   background: @row_hover;
 }
 
-/* The selected process's details: a card under the table, or beside it. */
-.details-panel.docked {
-  margin-top: 0;
-  margin-left: 10px;
-}
-
-.details-panel {
-  margin-top: 10px;
-  background: @theme_card;
-  border: none;
-  border-radius: var(--nyx-radius-card);
-  padding: 12px 16px;
-}
-
-.details-title {
-  font-size: 15px;
-  font-weight: 600;
-}
 
 window.activity-window list.service-list,
 window.activity-window list.table-card {
@@ -735,6 +704,331 @@ window.activity-window button.ranking-more {
 window.activity-window .settings-page.fill,
 window.activity-window .settings-page.fill.narrow {
   padding: 0;
+}
+
+/* ---------- Processes ---------- */
+
+/* The views, the filter and the totals over the table. */
+.proc-toolbar {
+  min-height: 54px;
+  padding: 0 10px 0 16px;
+  border-bottom: 1px solid @divider;
+}
+
+window.activity-window .proc-toolbar .segmented button.segment {
+  min-height: 28px;
+  padding: 0 12px;
+  font-size: 12.5px;
+}
+
+window.activity-window entry.proc-filter,
+window.activity-window .proc-filter {
+  min-width: 300px;
+  min-height: 30px;
+  font-size: 12.5px;
+}
+
+.settings-page.narrow .proc-filter {
+  min-width: 220px;
+}
+
+.settings-page.narrow .proc-totals {
+  opacity: 0;
+}
+
+.proc-totals {
+  margin-right: 4px;
+  font-size: 12px;
+  color: @theme_text_tertiary;
+}
+
+.columns-menu {
+  padding: 4px 6px;
+}
+
+.columns-menu-title {
+  margin: 2px 4px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: @theme_text_tertiary;
+}
+
+.columns-menu separator {
+  margin: 6px 0;
+}
+
+/* The table: names on the left, numbers in aligned columns on the right. */
+window.activity-window columnview.proc-table > header {
+  padding: 0 6px;
+  border-bottom: 1px solid @divider;
+}
+
+/* Over the names, past the chevron and the icon. */
+window.activity-window columnview.proc-table > header > button:first-child {
+  padding-left: 70px;
+}
+
+/* The right padding is short by the title box's spacing, kept after the label even
+ * when the sort arrow takes no room. */
+window.activity-window columnview.proc-table > header > button {
+  min-height: 34px;
+  padding: 0 6px 0 12px;
+}
+
+window.activity-window columnview.proc-table > header > button > box > label {
+  letter-spacing: 0;
+}
+
+/* Only the sorted column's arrow takes room, so every title ends over its numbers. */
+window.activity-window columnview.proc-table > header > button sort-indicator {
+  -gtk-icon-size: 12px;
+}
+
+window.activity-window columnview.proc-table > header > button sort-indicator:not(.ascending):not(.descending) {
+  -gtk-icon-size: 0;
+  min-width: 0;
+  margin: 0;
+}
+
+window.activity-window columnview.proc-table > listview {
+  padding: 4px 6px 12px;
+}
+
+window.activity-window columnview.proc-table > listview > row {
+  min-height: 32px;
+  border-radius: var(--nyx-radius-small);
+}
+
+window.activity-window columnview.proc-table > listview > row > cell {
+  padding: 0 12px;
+}
+
+window.activity-window columnview.proc-table > listview > row > cell:first-child {
+  padding-left: 6px;
+}
+
+.proc-name-cell {
+  min-height: 40px;
+}
+
+.proc-name-cell.kid {
+  min-height: 32px;
+}
+
+.proc-name-cell > .proc-face {
+  margin: 0 10px;
+}
+
+/* A process under its app: a thin line down from the app's tile. */
+.proc-name-cell > .proc-guide {
+  min-width: 24px;
+  margin: 0 10px 0 12px;
+  border-left: 1px solid alpha(@theme_text, 0.16);
+}
+
+.proc-name.strong {
+  font-weight: 500;
+}
+
+.cell-num.small {
+  font-size: 12px;
+}
+
+.proc-name-cell .tag {
+  margin-left: 6px;
+}
+
+.cpu-track {
+  min-width: 52px;
+  min-height: 5px;
+  border-radius: 3px;
+  background: @track;
+}
+
+.cpu-fill {
+  min-height: 5px;
+  border-radius: 3px;
+  background: @theme_accent;
+}
+
+/* Apps, Background and System: the sidebar's group headings, across the table. */
+window.activity-window columnview.proc-table > listview > header {
+  padding: 0;
+  background: none;
+}
+
+.nav-group-row.proc-section {
+  margin: 14px 10px 4px;
+  padding: 0 0 5px;
+  border-bottom: 1px solid alpha(currentColor, 0.35);
+}
+
+.proc-section .nav-group {
+  margin: 0;
+  padding: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+
+.proc-section-count {
+  margin-left: 8px;
+  font-size: 11px;
+  font-weight: 500;
+  color: @theme_text_tertiary;
+}
+
+/* An app without its own icon: its letter on a satin tile, in its colour (the
+ * swatch class sets `color`), as Umbra draws app icons. */
+.app-tile {
+  border-radius: 7px;
+  background-image: radial-gradient(circle at 18% 10%, alpha(currentColor, 0.24), transparent 75%),
+    linear-gradient(#292a2f, #16171b);
+  box-shadow: inset 0 0 0 1px alpha(currentColor, 0.32), 0 1px 2px alpha(black, 0.35);
+}
+
+.app-tile.light {
+  background-image: radial-gradient(circle at 18% 10%, alpha(currentColor, 0.2), transparent 75%),
+    linear-gradient(#ffffff, #e8e9ef);
+  box-shadow: inset 0 0 0 1px alpha(currentColor, 0.35), 0 1px 2px alpha(black, 0.12);
+}
+
+.app-tile > label {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.proc-face.large .app-tile {
+  border-radius: 10px;
+}
+
+.proc-face.large .app-tile > label {
+  font-size: 18px;
+}
+
+.proc-face.foot .app-tile {
+  border-radius: 8px;
+}
+
+.proc-face.foot .app-tile > label {
+  font-size: 13px;
+}
+
+/* The selection, beside the table. */
+.proc-inspector {
+  border-left: 1px solid @divider;
+}
+
+.insp-head {
+  padding: 14px 14px 10px;
+}
+
+.insp-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.insp-sub {
+  font-size: 12px;
+  color: @theme_text_tertiary;
+}
+
+.insp-body {
+  padding: 0 14px 12px;
+}
+
+.insp-lab {
+  margin: 10px 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: @theme_dim_text;
+}
+
+.insp-now {
+  font-weight: 500;
+  color: @theme_text_tertiary;
+}
+
+.insp-graph,
+.insp-card {
+  border-radius: var(--nyx-radius-card);
+  background: @theme_card;
+  box-shadow: inset 0 0 0 1px @hairline;
+}
+
+.insp-graph {
+  padding: 8px 10px 4px;
+}
+
+.insp-row {
+  min-height: 30px;
+  padding: 6px 10px;
+  font-size: 12.5px;
+}
+
+.insp-row + .insp-row {
+  border-top: 1px solid @hairline;
+}
+
+.insp-key {
+  color: @theme_dim_text;
+}
+
+window.activity-window label.insp-value.mono {
+  font-family: inherit;
+}
+
+.insp-foot,
+.proc-foot {
+  padding: 10px 12px;
+}
+
+.proc-foot {
+  padding: 10px 14px;
+  border-top: 1px solid @divider;
+  background: mix(@theme_bg, @theme_accent, 0.05);
+}
+
+.foot-title {
+  font-weight: 600;
+}
+
+.foot-sub {
+  font-size: 12px;
+  color: @theme_text_tertiary;
+}
+
+window.activity-window .insp-foot button,
+window.activity-window .proc-foot button {
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 12.5px;
+}
+
+window.activity-window .insp-foot button.icon-button,
+window.activity-window .insp-foot menubutton > button,
+window.activity-window .proc-foot button.icon-button {
+  min-width: 30px;
+  padding: 0;
+}
+
+window.activity-window .insp-foot button:not(.icon-button):not(.destructive-action),
+window.activity-window .proc-foot button:not(.icon-button):not(.destructive-action) {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px @hairline;
+}
+
+/* End task: the one solid red button. */
+window.activity-window .insp-foot button.destructive-action,
+window.activity-window .proc-foot button.destructive-action {
+  background: @theme_danger;
+  color: white;
+  font-weight: 600;
+}
+
+window.activity-window .insp-foot button.destructive-action:hover,
+window.activity-window .proc-foot button.destructive-action:hover {
+  background: mix(@theme_danger, @theme_text, 0.12);
 }
 
 /* ---------- Dashboard ---------- */
