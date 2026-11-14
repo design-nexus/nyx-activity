@@ -981,7 +981,7 @@ fn battery_card() -> Card {
 }
 
 fn load_card() -> Card {
-    let (c, _) = card("load", "utilities-system-monitor-symbolic", "Details", || window::navigate("cpu"), 1);
+    let (c, _) = card("load", "activity-cpu-symbolic", "Details", || window::navigate("cpu"), 1);
     let (v, sub) = big_value(&c.root);
     c.root.append(&spark("cpu.load", "teal", Scale::Auto { floor: 1.0 }, 54, |v| format!("{v:.2}")));
     let note = foot(&c.root);

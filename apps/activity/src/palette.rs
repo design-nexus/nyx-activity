@@ -51,7 +51,7 @@ fn static_items() -> Vec<Item> {
                 title,
                 detail: format!("PID {} · {}", p.pid, p.cmdline),
                 kind: "Process",
-                icon: "utilities-system-monitor-symbolic".into(),
+                icon: "activity-processes-symbolic".into(),
                 target: Target::Process(p.pid),
             });
         }

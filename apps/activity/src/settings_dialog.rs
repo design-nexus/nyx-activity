@@ -10,7 +10,7 @@ pub use nyx_ui::settings_card::{escape, fit, focus_search, is_open};
 
 /// Each settings group's icon and one-line summary in the dialog's list.
 const GROUPS: &[(&str, &str, &str)] = &[
-    ("Monitoring", "utilities-system-monitor-symbolic", "Update rate, history, units"),
+    ("Monitoring", "activity-cpu-symbolic", "Update rate, history, units"),
     ("Warnings", "dialog-warning-symbolic", "Temperature, memory, disk"),
     ("Alerts", "preferences-system-notifications-symbolic", "Hot CPU, low memory, failures"),
     ("Processes", "view-list-symbolic", "Ending tasks, kernel threads"),

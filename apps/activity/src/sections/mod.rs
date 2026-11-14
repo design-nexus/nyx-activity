@@ -58,7 +58,7 @@ pub fn all() -> Vec<Section> {
         Section {
             id: "processes",
             title: "Processes",
-            icon: "utilities-system-monitor-symbolic",
+            icon: "activity-processes-symbolic",
             group: "",
             description: "Every running program. End, pause or reprioritize any of them.",
             keywords: "tasks apps kill end terminate stop signal nice priority pid tree",

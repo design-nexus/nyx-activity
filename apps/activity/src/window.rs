@@ -66,7 +66,7 @@ pub fn present(app: &gtk::Application, section: Option<&str>) {
     }
 }
 
-/// Our own symbolic icons (the icon theme may lack a CPU or memory glyph).
+/// Our own symbolic icons (the icon theme may lack a CPU, memory or process-list glyph).
 /// They're written to the cache once and added to the icon search path.
 fn install_icons() {
     const ICONS: &[(&str, &str)] = &[
@@ -74,6 +74,7 @@ fn install_icons() {
         ("activity-memory-symbolic.svg", include_str!("../data/icons/activity-memory-symbolic.svg")),
         ("activity-gpu-symbolic.svg", include_str!("../data/icons/activity-gpu-symbolic.svg")),
         ("activity-thermometer-symbolic.svg", include_str!("../data/icons/activity-thermometer-symbolic.svg")),
+        ("activity-processes-symbolic.svg", include_str!("../data/icons/activity-processes-symbolic.svg")),
     ];
     let dir = crate::paths::cache_dir().join("icons");
     for (name, svg) in ICONS {
