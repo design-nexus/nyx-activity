@@ -723,13 +723,9 @@ window.activity-window .proc-toolbar .segmented button.segment {
 
 window.activity-window entry.proc-filter,
 window.activity-window .proc-filter {
-  min-width: 300px;
+  min-width: 140px;
   min-height: 30px;
   font-size: 12.5px;
-}
-
-.settings-page.narrow .proc-filter {
-  min-width: 220px;
 }
 
 .settings-page.narrow .proc-totals {

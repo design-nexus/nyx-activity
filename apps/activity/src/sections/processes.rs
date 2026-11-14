@@ -2163,15 +2163,24 @@ fn save_sort(st: &State) {
 /// The columns the user chose; a narrow window keeps only Name, CPU and Memory.
 fn apply_columns(s: &State) {
     let hidden = prefs::get().hidden_columns;
-    for (col, c) in &s.columns {
-        let wanted = *col == Col::Name || !hidden.iter().any(|h| h == col_id(*col));
-        let shown = wanted && (!s.narrow || NARROW_COLUMNS.contains(col));
-        if c.is_visible() != shown {
+    let changes: Vec<(gtk::ColumnViewColumn, bool)> = s
+        .columns
+        .iter()
+        .filter_map(|(col, c)| {
+            let wanted = *col == Col::Name || !hidden.iter().any(|h| h == col_id(*col));
+            let shown = wanted && (!s.narrow || NARROW_COLUMNS.contains(col));
+            (c.is_visible() != shown).then(|| (c.clone(), shown))
+        })
+        .collect();
+    let cv = s.view_widget.clone();
+    // Showing a column binds its cells at once, and binding borrows the state the
+    // caller holds: change them once it's let go.
+    glib::idle_add_local_once(move || {
+        for (c, shown) in changes {
             c.set_visible(shown);
         }
-    }
-    let cv = s.view_widget.clone();
-    glib::idle_add_local_once(move || align_titles(&cv));
+        align_titles(&cv);
+    });
 }
 
 /// Number columns' titles sit over their numbers, at the right.
@@ -2256,6 +2265,8 @@ pub fn build(page: &Page) {
     let search = gtk::SearchEntry::new();
     search.add_css_class("proc-filter");
     search.set_placeholder_text(Some("Filter by name, command or PID"));
+    // About 300 px when there's room; it gives way first so a half-screen window fits.
+    search.set_max_width_chars(34);
     // A funnel, not a magnifier: this narrows the list, Go to finds things.
     if let Some(icon) = search.first_child().and_downcast::<gtk::Image>() {
         icon.set_icon_name(Some("activity-filter-symbolic"));
@@ -2266,6 +2277,7 @@ pub fn build(page: &Page) {
     toolbar.append(&spacer);
     let totals = widgets::label("", "proc-totals");
     totals.add_css_class("tnum");
+    totals.set_ellipsize(gtk::pango::EllipsizeMode::End);
     toolbar.append(&totals);
     let columns_menu = gtk::MenuButton::new();
     columns_menu.set_icon_name("view-list-symbolic");
