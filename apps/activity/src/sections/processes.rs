@@ -433,6 +433,7 @@ fn setup_cell(col: Col) -> gtk::Widget {
             let indent = widgets::hbox(0);
             let expander = gtk::Button::from_icon_name("pan-end-symbolic");
             expander.add_css_class("tree-expander");
+            expander.set_tooltip_text(Some("Show or hide its processes"));
             expander.set_valign(gtk::Align::Center);
             expander.set_focusable(false);
             let face = face("row", 26);
