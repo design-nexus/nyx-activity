@@ -294,7 +294,7 @@ impl ProcSampler {
                             let base = base.split_whitespace().next().unwrap_or(base);
                             base.starts_with(&name).then(|| base.to_string())
                         });
-                        if let Some(full) = full {
+                        if let Some(full) = full.or_else(|| truncated_wrapper(&name, args.first())) {
                             name = full;
                         }
                     }
@@ -403,6 +403,14 @@ impl ProcSampler {
 
 /// The program's own name for Nix's wrapper, `.NAME-wrapped` (wrapped again:
 /// `..NAME-wrapped-wrapped`); other names as they are.
+/// A Nix wrapper's program (`.Hyprland-wrapped`) keeps its real name as argv[0]
+/// (`Hyprland`), while comm cuts it to `.Hyprland-wrapp`. That name, when they agree.
+fn truncated_wrapper(comm: &str, argv0: Option<&String>) -> Option<String> {
+    let base = argv0?.rsplit('/').next()?;
+    let rest = comm.strip_prefix('.')?.strip_prefix(base)?;
+    (!base.is_empty() && !rest.is_empty() && "-wrapped".starts_with(rest)).then(|| base.to_string())
+}
+
 fn unwrapped(name: &str) -> String {
     let mut n = name;
     while let Some(inner) = n.strip_prefix('.').and_then(|x| x.strip_suffix("-wrapped")) {
@@ -422,6 +430,18 @@ mod tests {
         assert_eq!(super::unwrapped("..firefox-wrapped-wrapped"), "firefox");
         assert_eq!(super::unwrapped("bash"), "bash");
         assert_eq!(super::unwrapped(".-wrapped"), ".-wrapped");
+    }
+
+    #[test]
+    fn cut_wrapper_names_come_from_argv0() {
+        let a = |s: &str| Some(s.to_string());
+        let t = super::truncated_wrapper;
+        assert_eq!(t(".Hyprland-wrapp", a("/run/current-system/sw/bin/Hyprland").as_ref()), a("Hyprland"));
+        assert_eq!(t(".nyx-assistant-", a("nyx-assistant").as_ref()), a("nyx-assistant"));
+        assert_eq!(t(".nyx-activity-w", a("/nix/store/x/bin/nyx-activity").as_ref()), a("nyx-activity"));
+        assert_eq!(t(".Hyprland-wrapp", a("bash").as_ref()), None);
+        assert_eq!(t(".something-else", a("something").as_ref()), None);
+        assert_eq!(t(".Hyprland-wrapp", None), None);
     }
 
     use super::*;
