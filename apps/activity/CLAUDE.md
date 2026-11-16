@@ -20,7 +20,7 @@
   `visible`. GTK re-binds rows synchronously, so never hold a `STATE` borrow across
   store/filter/sorter changes. `apply_view` also keeps the scroll position still
   (ListView otherwise follows its anchor row after a re-sort).
-- Don't wake the dGPU: no `lspci`, no Vulkan renderer (main.rs sets `GSK_RENDERER=ngl`),
+- Don't wake the dGPU: no `lspci`, no Vulkan renderer (main.rs sets `GSK_RENDERER=gl`),
   `nvidia-smi` only while `runtime_status` isn't `suspended`. Check with
   `cat /sys/bus/pci/devices/0000:01:00.0/power/runtime_status` while the app runs.
 - Never edit the user's Hyprland files except the one `require` line added on request
