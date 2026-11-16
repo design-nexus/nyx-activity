@@ -44,8 +44,6 @@ pub struct Gpu {
     pub max_clock: Option<f64>,
     /// The clock it actually ran at (Intel: 0 while asleep in RC6).
     pub act_clock: Option<f64>,
-    /// % of the time spent in its deepest power-saving state (Intel RC6).
-    pub rc6: Option<f64>,
     /// Each engine's busy % (render, video, copy, compute), from the clients' fdinfo.
     pub engines: Vec<(String, f64)>,
     /// Memory the apps using it hold (fdinfo `drm-resident-*`).
@@ -189,23 +187,15 @@ pub struct GpuSampler {
     /// so our own queries don't keep the GPU from going back to sleep.
     idle_reads: u32,
     rest_until: Option<std::time::Instant>,
-    /// Per card: when RC6 residency was last read, and its value (ms).
-    rc6_prev: std::collections::HashMap<String, (std::time::Instant, f64)>,
 }
 
 impl GpuSampler {
     pub fn new() -> Self {
-        GpuSampler {
-            cards: cards(),
-            tick: 0,
-            last_nvidia: None,
-            idle_reads: 0,
-            rest_until: None,
-            rc6_prev: std::collections::HashMap::new(),
-        }
+        GpuSampler { cards: cards(), tick: 0, last_nvidia: None, idle_reads: 0, rest_until: None }
     }
 
-    pub fn sample(&mut self, clients: &GpuClients) -> Vec<Gpu> {
+    /// `force`: read a sleeping or idle NVIDIA GPU this once (it wakes it).
+    pub fn sample(&mut self, clients: &GpuClients, force: bool) -> Vec<Gpu> {
         self.tick += 1;
         let mut out = Vec::new();
         for card in &self.cards {
@@ -221,7 +211,7 @@ impl GpuSampler {
                 ..Default::default()
             };
             let runtime = read(&dev.join("power/runtime_status").to_string_lossy()).trim().to_string();
-            if runtime == "suspended" {
+            if runtime == "suspended" && !(force && card.vendor == Vendor::Nvidia) {
                 g.power_state = Power::Asleep;
                 out.push(g);
                 continue;
@@ -230,10 +220,10 @@ impl GpuSampler {
                 Vendor::Nvidia => {
                     g.clients = g.clients.max(clients.nvidia);
                     let resting = self.rest_until.is_some_and(|t| std::time::Instant::now() < t);
-                    if g.clients == 0 || resting {
+                    if (g.clients == 0 || resting) && !force {
                         g.power_state = Power::Idle;
                         self.last_nvidia = None;
-                    } else if self.tick.is_multiple_of(2) || self.last_nvidia.is_none() {
+                    } else if force || self.tick.is_multiple_of(2) || self.last_nvidia.is_none() {
                         let out = Command::new("nvidia-smi")
                             .args([
                                 "-i",
@@ -276,18 +266,6 @@ impl GpuSampler {
                     g.clock = num(&card.dir.join("gt_cur_freq_mhz")).or_else(|| num(&dev.join("tile0/gt0/freq0/cur_freq")));
                     g.max_clock = num(&card.dir.join("gt_max_freq_mhz")).or_else(|| num(&dev.join("tile0/gt0/freq0/max_freq")));
                     g.act_clock = num(&card.dir.join("gt_act_freq_mhz")).or_else(|| num(&dev.join("tile0/gt0/freq0/act_freq")));
-                    let rc6 = num(&card.dir.join("gt/gt0/rc6_residency_ms"))
-                        .or_else(|| num(&dev.join("tile0/gt0/gtidle/idle_residency_ms")));
-                    if let Some(now) = rc6 {
-                        let t = std::time::Instant::now();
-                        if let Some((at, before)) = self.rc6_prev.get(&card.pci) {
-                            let wall = t.duration_since(*at).as_secs_f64() * 1000.0;
-                            if wall > 0.0 {
-                                g.rc6 = Some(((now - before) / wall * 100.0).clamp(0.0, 100.0));
-                            }
-                        }
-                        self.rc6_prev.insert(card.pci.clone(), (t, now));
-                    }
                 }
                 Vendor::Amd => {
                     g.util = num(&dev.join("gpu_busy_percent"));

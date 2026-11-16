@@ -2,7 +2,6 @@
 
 pub use nyx_ui::widgets::*;
 
-use gtk::pango;
 use gtk::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -61,14 +60,6 @@ impl Page {
         Group { wrapper, list }
     }
 
-    /// A group whose rows are cards straight on the page (see `charts::row`).
-    pub fn diagnostics(&self, key: &str, title: &str) -> Group {
-        let g = self.cards("");
-        self.body.remove(&g.wrapper);
-        self.body.append(&disclosure(key, title, &g.wrapper));
-        g
-    }
-
     pub fn cards(&self, title: &str) -> Group {
         let g = self.group(title);
         g.list.add_css_class("bare");
@@ -86,20 +77,6 @@ pub struct Group {
 impl Group {
     pub fn add(&self, w: &impl IsA<gtk::Widget>) {
         self.list.append(w);
-    }
-
-    /// Put a small control at the right end of the group's title line.
-    pub fn header_end(&self, w: &impl IsA<gtk::Widget>) {
-        let Some(title) = self.wrapper.first_child() else { return };
-        self.wrapper.remove(&title);
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        row.add_css_class("group-head");
-        title.set_hexpand(true);
-        title.set_valign(gtk::Align::Center);
-        row.append(&title);
-        w.set_valign(gtk::Align::Center);
-        row.append(w);
-        self.wrapper.prepend(&row);
     }
 
     pub fn note(&self, text: &str) {
@@ -121,42 +98,7 @@ impl Group {
 
 // ---------- Rows ----------
 
-/// A row with a number field. `on_change` gets each new value.
-pub fn spin_row(
-    title: &str,
-    desc: &str,
-    (min, max, step): (f64, f64, f64),
-    value: f64,
-    on_change: impl Fn(f64) + 'static,
-) -> (gtk::Box, gtk::SpinButton) {
-    let spin = gtk::SpinButton::with_range(min, max, step);
-    spin.set_value(value);
-    spin.set_valign(gtk::Align::Center);
-    spin.connect_value_changed(move |s| on_change(s.value()));
-    (row(title, desc, Some(spin.upcast_ref())), spin)
-}
-
 // ---------- Monitoring pieces ----------
-
-/// A card holding a graph: title on the left, a live summary on the right.
-pub fn graph_card(title: &str, graph: &impl IsA<gtk::Widget>) -> (gtk::Box, gtk::Label) {
-    let card = vbox(10);
-    card.add_css_class("graph-card");
-    let head = hbox(10);
-    let t = label(title, "graph-card-title");
-    t.set_hexpand(true);
-    t.set_ellipsize(pango::EllipsizeMode::End);
-    let summary = label("", "dim");
-    summary.add_css_class("tnum");
-    summary.set_ellipsize(pango::EllipsizeMode::End);
-    summary.set_max_width_chars(26);
-    summary.set_xalign(1.0);
-    head.append(&t);
-    head.append(&summary);
-    card.append(&head);
-    card.append(graph);
-    (card, summary)
-}
 
 /// Mark a value as past its warning threshold (or not).
 pub fn set_warn(w: &impl IsA<gtk::Widget>, over: bool) {
@@ -223,78 +165,4 @@ pub fn two_click_if(
         });
     });
     b
-}
-
-/// A keyboard-accessible disclosure whose state survives navigation and restarts.
-pub fn disclosure(key: &str, title: &str, child: &impl IsA<gtk::Widget>) -> gtk::Expander {
-    let expander = gtk::Expander::new(Some(title));
-    expander.add_css_class("diagnostic-group");
-    expander.set_hexpand(true);
-    expander.set_expanded(crate::prefs::get().expanded_groups.get(key).copied().unwrap_or(false));
-    expander.set_child(Some(child));
-    let key = key.to_string();
-    expander.connect_expanded_notify(move |e| {
-        crate::prefs::update(|p| {
-            p.expanded_groups.insert(key.clone(), e.is_expanded());
-        });
-    });
-    expander
-}
-
-/// Put a pair of existing ranking cards behind one saved view switch.
-pub fn consumers(key: &str, first: (&str, &gtk::Box), second: (&str, &gtk::Box)) -> gtk::Box {
-    let stack = gtk::Stack::new();
-    stack.set_hhomogeneous(false);
-    stack.set_vhomogeneous(false);
-    stack.set_transition_type(gtk::StackTransitionType::None);
-    for (id, (_, card)) in [("apps", first), ("processes", second)] {
-        card.remove_css_class("graph-card");
-        // Keep each mode's live summary, but avoid repeating its old heading.
-        if let Some(head) = card.first_child() {
-            if let Some(title) = head.first_child() {
-                title.set_visible(false);
-            }
-            if let Some(summary) = head.last_child().and_downcast::<gtk::Label>() {
-                head.set_visible(!summary.text().is_empty());
-                let head = head.downgrade();
-                summary.connect_notify_local(Some("label"), move |summary, _| {
-                    if let Some(head) = head.upgrade() {
-                        head.set_visible(!summary.text().is_empty());
-                    }
-                });
-            }
-        }
-        stack.add_named(card, Some(id));
-    }
-    let selected = crate::prefs::get().consumer_views.get(key).cloned().unwrap_or_else(|| "apps".into());
-    stack.set_visible_child_name(if selected == "processes" { "processes" } else { "apps" });
-    let (card, _) = graph_card("Top consumers", &stack);
-    let head = card.first_child().and_downcast::<gtk::Box>().expect("card header");
-    let a = gtk::ToggleButton::with_label(first.0);
-    let b = gtk::ToggleButton::with_label(second.0);
-    b.set_group(Some(&a));
-    for (id, button) in [("apps", &a), ("processes", &b)] {
-        button.add_css_class("chip");
-        button.add_css_class("small");
-        let active = stack.visible_child_name().as_deref() == Some(id);
-        button.set_active(active);
-        if active {
-            button.add_css_class("selected");
-        }
-        let stack = stack.clone();
-        let key = key.to_string();
-        button.connect_toggled(move |button| {
-            if button.is_active() {
-                button.add_css_class("selected");
-                stack.set_visible_child_name(id);
-                crate::prefs::update(|p| {
-                    p.consumer_views.insert(key.clone(), id.into());
-                });
-            } else {
-                button.remove_css_class("selected");
-            }
-        });
-        head.append(button);
-    }
-    card
 }

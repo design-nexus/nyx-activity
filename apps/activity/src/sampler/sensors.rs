@@ -19,17 +19,10 @@ pub struct Battery {
     pub status: String,
     /// Positive while discharging or charging, in watts.
     pub watts: f64,
-    pub energy_now: f64,
     pub energy_full: f64,
     pub energy_design: f64,
-    pub cycles: Option<u64>,
     /// Hours until empty (discharging) or full (charging).
     pub hours_left: Option<f64>,
-    pub volts: f64,
-    pub model: String,
-    pub technology: String,
-    /// Charging stops at this % (to spare the battery), when set below 100.
-    pub limit: Option<f64>,
 }
 
 /// A USB-C port that can charge the machine.
@@ -187,26 +180,7 @@ fn battery(p: &Path) -> Battery {
     } else {
         None
     };
-    Battery {
-        name,
-        percent,
-        status,
-        watts,
-        energy_now,
-        energy_full,
-        energy_design,
-        cycles: num(&p.join("cycle_count")).map(|c| c as u64).filter(|c| *c > 0),
-        hours_left,
-        volts,
-        model: [read(&p.join("manufacturer").to_string_lossy()), read(&p.join("model_name").to_string_lossy())]
-            .iter()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join(" "),
-        technology: read(&p.join("technology").to_string_lossy()).trim().to_string(),
-        limit: num(&p.join("charge_control_end_threshold")).filter(|l| *l > 0.0 && *l < 100.0),
-    }
+    Battery { name, percent, status, watts, energy_full, energy_design, hours_left }
 }
 
 #[cfg(test)]

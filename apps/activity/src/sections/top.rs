@@ -11,8 +11,6 @@ use crate::sampler::procs::Proc;
 pub enum By {
     Cpu,
     Mem,
-    Swap,
-    Io,
     Gpu,
     GpuMem,
 }
@@ -22,8 +20,6 @@ impl By {
         match self {
             By::Cpu => p.cpu,
             By::Mem => p.rss as f64,
-            By::Swap => p.swap as f64,
-            By::Io => p.read_bps + p.write_bps,
             By::Gpu => p.gpu,
             By::GpuMem => p.gpu_mem as f64,
         }
@@ -33,8 +29,6 @@ impl By {
         match self {
             By::Cpu => g.cpu,
             By::Mem => g.memory() as f64,
-            By::Swap => g.swap as f64,
-            By::Io => g.io,
             By::Gpu => g.gpu,
             By::GpuMem => g.gpu_mem as f64,
         }
@@ -43,8 +37,7 @@ impl By {
     pub fn show(self, v: f64) -> String {
         match self {
             By::Cpu | By::Gpu => fmt::pct(v),
-            By::Mem | By::Swap | By::GpuMem => fmt::bytes(v),
-            By::Io => fmt::rate(v),
+            By::Mem | By::GpuMem => fmt::bytes(v),
         }
     }
 
@@ -52,8 +45,7 @@ impl By {
     fn floor(self) -> f64 {
         match self {
             By::Cpu | By::Gpu => 0.05,
-            By::Mem | By::Swap | By::GpuMem => 1024.0 * 1024.0,
-            By::Io => 1.0,
+            By::Mem | By::GpuMem => 1024.0 * 1024.0,
         }
     }
 }
@@ -97,15 +89,7 @@ pub fn procs(snap: &Snapshot, by: By, n: usize, whole: Option<f64>) -> Vec<Bar> 
     ps.into_iter()
         .map(|p| {
             let (_, icon) = app_identity(&p.name, &[p.pid], snap);
-            Bar {
-                name: p.name.clone(),
-                icon,
-                frac: by.proc(p) / max,
-                value: by.show(by.proc(p)),
-                tip: String::new(),
-                pid: p.pid,
-                warn: false,
-            }
+            Bar { name: p.name.clone(), icon, frac: by.proc(p) / max, value: by.show(by.proc(p)), tip: String::new(), pid: p.pid }
         })
         .collect()
 }
@@ -126,7 +110,7 @@ pub fn groups(snap: &Snapshot, by: By, n: usize, whole: Option<f64>) -> Vec<Bar>
                 tip.push_str(&format!("\nPlus {} of file cache it could give back", fmt::bytes(g.cache as f64)));
             }
             tip.push_str("\nClick to show it in Processes");
-            Bar { name, icon, frac: by.group(g) / max, value: by.show(by.group(g)), tip, pid: g.leader, warn: false }
+            Bar { name, icon, frac: by.group(g) / max, value: by.show(by.group(g)), tip, pid: g.leader }
         })
         .collect()
 }

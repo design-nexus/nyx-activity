@@ -1,32 +1,12 @@
-use crate::charts::{self, Bar, PAIR};
 use crate::sampler::groups::Kind;
 use crate::startup::{self, Timer, Unit};
 use crate::widgets::{self, Page};
-use crate::{cmd, fmt, live, prefs, window};
+use crate::{charts, cmd, fmt, live, parts, prefs, window};
 use gtk::prelude::*;
 use gtk::{gio, glib, pango};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Show {
-    All,
-    Running,
-    Failed,
-}
-
-impl Show {
-    fn id(self) -> &'static str {
-        match self {
-            Show::All => "all",
-            Show::Running => "running",
-            Show::Failed => "failed",
-        }
-    }
-}
-
-type Chip<'a> = (&'a str, Rc<dyn Fn()>);
 
 /// One row: a service, or a timer with the unit it starts.
 #[derive(Clone, PartialEq)]
@@ -38,21 +18,20 @@ struct Entry {
 struct State {
     user: Cell<bool>,
     timers: Cell<bool>,
-    show: Cell<Show>,
     query: RefCell<String>,
     entries: RefCell<HashMap<String, Entry>>,
     /// Rows by unit name, kept between refreshes so the list doesn't jump.
     rows: RefCell<HashMap<String, gtk::ListBoxRow>>,
-    /// Each row's memory figure, refreshed in place.
-    mem_labels: RefCell<HashMap<String, gtk::Label>>,
+    /// Each row's state line ("Running · 54 MB"), refreshed in place.
+    state_labels: RefCell<HashMap<String, gtk::Label>>,
     loading: Cell<bool>,
     list: gtk::ListBox,
     stack: gtk::Stack,
-    banner: gtk::Box,
     count: gtk::Label,
-    states: charts::StackBar,
-    memory: charts::BarList,
-    memory_sum: gtk::Label,
+    /// The unit shown beside the list.
+    chosen: RefCell<String>,
+    detail: Detail,
+    narrow: Cell<bool>,
 }
 
 /// Memory each unit's cgroup holds, from the last sample (services only).
@@ -65,39 +44,77 @@ fn unit_memory(user: bool) -> HashMap<String, u64> {
         .collect()
 }
 
-/// The running / failed / stopped split and the hungriest services.
-fn refresh_summary(st: &State) {
-    let entries = st.entries.borrow();
-    let running = entries.values().filter(|e| e.unit.running()).count();
-    let failed = entries.values().filter(|e| e.unit.failed()).count();
-    let stopped = entries.len().saturating_sub(running + failed);
-    let parts = [running as f64, failed as f64, stopped as f64];
-    st.states.set(&parts, (entries.len() as f64).max(1.0), &parts.map(|v| (v as u64).to_string()));
+/// When a failed unit failed, from the alerts' last check.
+fn failed_at(unit: &str) -> Option<i64> {
+    crate::alerts::failed().into_iter().find(|f| f.unit.name == unit).and_then(|f| f.since)
+}
 
+/// "11 Nov 04:13", or "04:13" today.
+fn short_when(unix: i64) -> String {
+    let (Ok(t), Ok(now)) = (glib::DateTime::from_unix_local(unix), glib::DateTime::now_local()) else { return String::new() };
+    let fmt_ = if (t.year(), t.day_of_year()) == (now.year(), now.day_of_year()) { "%H:%M" } else { "%-d %b %H:%M" };
+    t.format(fmt_).map(|s| s.to_string()).unwrap_or_default()
+}
+
+/// What a row says about its state, in words.
+fn state_line(e: &Entry, mem: Option<u64>) -> (String, &'static str) {
+    let u = &e.unit;
+    if u.failed() {
+        let when = failed_at(&u.name).map(|t| format!(" {}", short_when(t))).unwrap_or_default();
+        return (format!("Failed{when}"), "failed");
+    }
+    if let Some(t) = &e.timer {
+        let now = glib::real_time() as f64 / 1e6;
+        return match t.next {
+            Some(n) => (format!("Next {}", fmt::relative(n, now)), "running"),
+            None => ("Not scheduled".into(), ""),
+        };
+    }
+    if u.running() {
+        let m = mem.filter(|m| *m > 0).map(|m| format!(" · {}", fmt::bytes(m as f64))).unwrap_or_default();
+        let what = if u.sub == "running" || u.sub.is_empty() { "Running".to_string() } else { capital(&u.sub) };
+        (format!("{what}{m}"), "running")
+    } else {
+        ("Stopped".into(), "")
+    }
+}
+
+fn capital(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+}
+
+/// Failed first, then running, then stopped; by name within each.
+fn rank(e: &Entry) -> (u8, String) {
+    let u = &e.unit;
+    (
+        if u.failed() {
+            0
+        } else if u.running() {
+            1
+        } else {
+            2
+        },
+        title(e).to_lowercase(),
+    )
+}
+
+/// A service by what it does: its description, or its name when it has none.
+fn title(e: &Entry) -> String {
+    let d = e.timer.as_ref().map_or(e.unit.description.as_str(), |t| t.unit.description.as_str());
+    if d.is_empty() || d == e.unit.name { pretty_name(&e.unit.name) } else { d.to_string() }
+}
+
+fn refresh_states(st: &State) {
     let mem = unit_memory(st.user.get());
-    for (name, label) in st.mem_labels.borrow().iter() {
-        let text = mem.get(name).map(|m| fmt::bytes(*m as f64)).unwrap_or_default();
+    let entries = st.entries.borrow();
+    for (name, label) in st.state_labels.borrow().iter() {
+        let Some(e) = entries.get(name) else { continue };
+        let (text, _) = state_line(e, mem.get(name).copied());
         if label.text() != text {
             label.set_text(&text);
         }
     }
-    let mut top: Vec<(&String, &u64)> = mem.iter().collect();
-    top.sort_by(|a, b| b.1.cmp(a.1));
-    let max = top.first().map_or(1, |t| *t.1).max(1) as f64;
-    let bars: Vec<Bar> = top
-        .iter()
-        .take(4)
-        .map(|(unit, m)| Bar {
-            name: pretty_name(unit),
-            frac: **m as f64 / max,
-            value: fmt::bytes(**m as f64),
-            tip: unit.to_string(),
-            ..Default::default()
-        })
-        .collect();
-    st.memory.set(&bars);
-    let total: u64 = mem.values().sum();
-    st.memory_sum.set_text(&if total > 0 { format!("{} in all", fmt::bytes(total as f64)) } else { String::new() });
 }
 
 fn load(st: &Rc<State>, quiet: bool) {
@@ -129,32 +146,10 @@ fn load(st: &Rc<State>, quiet: bool) {
     );
 }
 
-fn state_tag(u: &Unit, timer: bool) -> gtk::Label {
-    if u.failed() {
-        widgets::tag("Failed", "danger")
-    } else if u.running() {
-        let text = if timer && u.sub == "waiting" {
-            "Scheduled"
-        } else if u.sub == "running" {
-            "Running"
-        } else {
-            &u.sub
-        };
-        widgets::tag(text, "accent")
-    } else {
-        widgets::tag("Stopped", "")
-    }
-}
-
 /// Bring the list in line with `entries`: update changed rows in place, add new
-/// ones, drop gone ones. Rows that didn't change aren't touched.
-fn populate(st: &Rc<State>, entries: Vec<Entry>) {
-    let failed = entries.iter().filter(|e| e.unit.failed()).count();
-    st.banner.set_visible(failed > 0);
-    if let Some(l) = st.banner.last_child().and_downcast::<gtk::Label>() {
-        let what = if st.timers.get() { "timer" } else { "service" };
-        l.set_text(&format!("{failed} {what}{} failed. Open one to see more.", if failed == 1 { "" } else { "s" }));
-    }
+/// ones, drop gone ones, and keep them failed, running, stopped.
+fn populate(st: &Rc<State>, mut entries: Vec<Entry>) {
+    entries.sort_by_key(rank);
     {
         let mut rows = st.rows.borrow_mut();
         let old = st.entries.borrow();
@@ -163,16 +158,19 @@ fn populate(st: &Rc<State>, entries: Vec<Entry>) {
             let keep = names.contains(name.as_str());
             if !keep {
                 st.list.remove(row);
-                st.mem_labels.borrow_mut().remove(name);
+                st.state_labels.borrow_mut().remove(name);
             }
             keep
         });
+        let mut moved = false;
         for (i, e) in entries.iter().enumerate() {
             match rows.get(&e.unit.name) {
                 Some(row) => {
-                    // Timers say "next in 3h", so they're redrawn every time.
-                    if old.get(&e.unit.name) != Some(e) || e.timer.is_some() {
+                    if old.get(&e.unit.name) != Some(e) {
                         row.set_child(Some(&row_content(st, e)));
+                    }
+                    if row.index() != i as i32 {
+                        moved = true;
                     }
                 }
                 None => {
@@ -184,40 +182,56 @@ fn populate(st: &Rc<State>, entries: Vec<Entry>) {
                 }
             }
         }
+        // A unit that changed state moves to its place.
+        if moved {
+            for e in entries.iter() {
+                if let Some(row) = rows.get(&e.unit.name) {
+                    st.list.remove(row);
+                    st.list.append(row);
+                }
+            }
+        }
     }
-    *st.entries.borrow_mut() = entries.into_iter().map(|e| (e.unit.name.clone(), e)).collect();
+    let running = entries.iter().filter(|e| e.unit.running()).count();
+    let failed = entries.iter().filter(|e| e.unit.failed()).count();
+    let stopped = entries.len().saturating_sub(running + failed);
+    *st.entries.borrow_mut() = entries.iter().cloned().map(|e| (e.unit.name.clone(), e)).collect();
     st.list.invalidate_filter();
-    refresh_count(st);
-    refresh_summary(st);
-}
-
-fn refresh_count(st: &State) {
-    let entries = st.entries.borrow();
-    let shown = entries.values().filter(|e| visible(st, e)).count();
-    if st.loading.get() && entries.is_empty() {
-        return;
-    }
-    let what = if st.timers.get() { "timers" } else { "services" };
-    st.count.set_text(&if shown == entries.len() {
-        format!("{shown} {what}")
-    } else {
-        format!("{shown} of {} {what} shown", entries.len())
-    });
+    let what = if st.timers.get() { "waiting" } else { "running" };
+    st.count.set_text(&format!("{running} {what} · {failed} failed · {stopped} stopped"));
+    refresh_states(st);
+    let shown = entries.iter().filter(|e| visible(st, e)).count();
     st.stack.set_visible_child_name(if shown == 0 { "empty" } else { "list" });
+    // The first time, the one that failed (or the first) is chosen.
+    let chosen = st.chosen.borrow().clone();
+    match st.entries.borrow().get(&chosen) {
+        Some(e) => {
+            let e = e.clone();
+            st.detail.refresh(&e);
+        }
+        None => {
+            if let Some(e) = entries.iter().find(|e| visible(st, e)) {
+                if let Some(row) = st.rows.borrow().get(&e.unit.name) {
+                    st.list.select_row(Some(row));
+                }
+                choose(st, e);
+            }
+        }
+    }
 }
 
 fn visible(st: &State, e: &Entry) -> bool {
     let q = st.query.borrow();
     let u = &e.unit;
-    let show = match st.show.get() {
-        Show::All => true,
-        Show::Running => u.running(),
-        Show::Failed => u.failed(),
-    };
-    show && (q.is_empty()
+    q.is_empty()
         || u.name.to_lowercase().contains(q.as_str())
         || u.description.to_lowercase().contains(q.as_str())
-        || e.timer.as_ref().is_some_and(|t| t.activates.to_lowercase().contains(q.as_str())))
+        || e.timer.as_ref().is_some_and(|t| t.activates.to_lowercase().contains(q.as_str()))
+}
+
+fn choose(st: &Rc<State>, e: &Entry) {
+    *st.chosen.borrow_mut() = e.unit.name.clone();
+    st.detail.show(st, e);
 }
 
 fn systemctl(st: &Rc<State>, verb: &str, unit: &str) {
@@ -272,102 +286,411 @@ fn verbs(u: &Unit) -> Vec<(&'static str, &'static str)> {
     v
 }
 
-/// One line per unit: state dot, name, what it is, memory, start-at-boot, actions.
+/// A row: its state dot, what it does with its unit name under it, and its state in words.
 fn row_content(st: &Rc<State>, e: &Entry) -> gtk::Box {
     let u = &e.unit;
-    let row = widgets::hbox(12);
+    let row = widgets::hbox(10);
     row.add_css_class("service-row");
     let dot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     dot.add_css_class("state-dot");
-    if u.failed() {
-        dot.add_css_class("failed");
-    } else if u.running() {
-        dot.add_css_class("running");
+    let (text, class) = state_line(e, None);
+    if !class.is_empty() {
+        dot.add_css_class(class);
     }
     dot.set_valign(gtk::Align::Center);
-    let state = state_tag(u, e.timer.is_some()).text();
-    dot.set_tooltip_text(Some(&state));
     row.append(&dot);
-    // Name and description share the row's middle equally, so they line up as columns.
-    let cols = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    cols.set_homogeneous(true);
-    cols.set_hexpand(true);
-    let t = widgets::label(&pretty_name(&u.name), "service-name");
+    let names = widgets::vbox(1);
+    names.set_hexpand(true);
+    let t = widgets::label(&title(e), "service-title");
+    t.set_xalign(0.0);
     t.set_ellipsize(pango::EllipsizeMode::End);
-    t.set_width_chars(12);
-    cols.append(&t);
-    row.append(&cols);
-    let desc = match &e.timer {
-        Some(t) => {
-            let now = glib::real_time() as f64 / 1e6;
-            let next = t.next.map(|n| format!("next {}", fmt::relative(n, now))).unwrap_or_else(|| "not scheduled".into());
-            let last = t.last.map(|l| format!("last {}", fmt::relative(l, now))).unwrap_or_else(|| "never run".into());
-            format!("Starts {} · {next} · {last}", pretty_name(&t.activates))
-        }
-        None => u.description.clone(),
-    };
-    let d = widgets::label(&desc, "cell-dim");
-    d.set_ellipsize(pango::EllipsizeMode::End);
-    cols.append(&d);
-    row.set_tooltip_text(Some(&format!(
-        "{}\n{state}{}",
-        u.name,
-        if desc.is_empty() { String::new() } else { format!(" · {desc}") }
-    )));
-    let mem = widgets::label("", "cell-dim");
-    mem.add_css_class("tnum");
-    mem.set_width_chars(9);
-    mem.set_xalign(1.0);
-    mem.set_tooltip_text(Some("Memory it holds"));
-    row.append(&mem);
-    st.mem_labels.borrow_mut().insert(u.name.clone(), mem);
-    let boot = widgets::label(if u.file_state.is_empty() { "–" } else { &u.file_state }, "cell-dim");
-    boot.set_width_chars(10);
-    boot.set_xalign(0.0);
-    boot.set_tooltip_text(Some("Starts at boot when enabled"));
-    if u.file_state == "enabled" {
-        boot.remove_css_class("cell-dim");
+    let n = widgets::label(u.name.trim_end_matches(".service").trim_end_matches(".timer"), "service-unit");
+    n.set_xalign(0.0);
+    n.set_ellipsize(pango::EllipsizeMode::Middle);
+    names.append(&t);
+    names.append(&n);
+    row.append(&names);
+    let state = widgets::label(&text, "service-state");
+    state.add_css_class("tnum");
+    if !class.is_empty() {
+        state.add_css_class(class);
     }
-    row.append(&boot);
-
-    let menu = gtk::MenuButton::new();
-    menu.set_icon_name("view-more-symbolic");
-    menu.set_tooltip_text(Some("Actions"));
-    menu.set_valign(gtk::Align::Center);
-    menu.add_css_class("flat");
-    let pop = gtk::Popover::new();
-    let actions = widgets::vbox(2);
-    for (label, verb) in verbs(u) {
-        let b = gtk::Button::with_label(label);
-        b.add_css_class("flat");
-        let (st2, name, pop2) = (st.clone(), u.name.clone(), pop.clone());
-        b.connect_clicked(move |_| {
-            pop2.popdown();
-            systemctl(&st2, verb, &name);
-        });
-        actions.append(&b);
-    }
-    let details = gtk::Button::with_label("Details");
-    details.add_css_class("flat");
-    let (st2, e2, pop2) = (st.clone(), e.clone(), pop.clone());
-    details.connect_clicked(move |_| {
-        pop2.popdown();
-        page_details(&st2, &e2);
-    });
-    actions.append(&details);
-    let logs = gtk::Button::with_label("View logs");
-    logs.add_css_class("flat");
-    let log_unit = e.timer.as_ref().map_or(u.name.clone(), |t| t.activates.clone());
-    let (user, pop2) = (st.user.get(), pop.clone());
-    logs.connect_clicked(move |_| {
-        pop2.popdown();
-        show_logs(&log_unit, user);
-    });
-    actions.append(&logs);
-    pop.set_child(Some(&actions));
-    menu.set_popover(Some(&pop));
-    row.append(&menu);
+    state.set_xalign(1.0);
+    row.append(&state);
+    st.state_labels.borrow_mut().insert(u.name.clone(), state);
+    row.set_tooltip_text(Some(&u.name));
     row
+}
+
+// ---------- Beside the list ----------
+
+struct Detail {
+    root: gtk::Box,
+    head: parts::Head,
+    state: charts::Tile,
+    ran: charts::Tile,
+    memory: charts::Tile,
+    actions: gtk::Box,
+    log: LogPanel,
+    /// Which unit's facts were last asked for, so a late answer for another is dropped.
+    asked: Rc<RefCell<String>>,
+}
+
+fn detail() -> Detail {
+    let root = widgets::vbox(12);
+    root.add_css_class("service-detail");
+    root.set_hexpand(true);
+    let head = parts::head("", "");
+    root.append(&head.root);
+    let state = charts::tile("State");
+    let ran = charts::tile("Ran for");
+    let memory = charts::tile("Memory");
+    root.append(&parts::readings(&[&state, &ran, &memory]));
+    let actions = widgets::hbox(8);
+    actions.add_css_class("service-actions");
+    root.append(&actions);
+    let log = log_panel();
+    root.append(&log.root);
+    Detail { root, head, state, ran, memory, actions, log, asked: Rc::default() }
+}
+
+/// systemd's monotonic µs as seconds, when set.
+fn mono(p: &HashMap<String, String>, k: &str) -> Option<f64> {
+    p.get(k).and_then(|v| v.parse::<f64>().ok()).filter(|v| *v > 0.0).map(|v| v / 1e6)
+}
+
+impl Detail {
+    fn show(&self, st: &Rc<State>, e: &Entry) {
+        let user = st.user.get();
+        let log_unit = e.timer.as_ref().map_or(e.unit.name.clone(), |t| t.activates.clone());
+        self.log.open(&log_unit, user);
+        while let Some(c) = self.actions.first_child() {
+            self.actions.remove(&c);
+        }
+        let u = &e.unit;
+        let act = |label: &str, icon: &str, verb: &'static str, class: &str| {
+            let b = if icon.is_empty() { gtk::Button::with_label(label) } else { widgets::labeled_button(icon, label) };
+            if !class.is_empty() {
+                b.add_css_class(class);
+            }
+            let (st, name) = (st.clone(), u.name.clone());
+            b.connect_clicked(move |_| systemctl(&st, verb, &name));
+            self.actions.append(&b);
+        };
+        if u.running() {
+            act("Restart", "view-refresh-symbolic", "restart", "suggested-action");
+            act("Stop", "media-playback-stop-symbolic", "stop", "");
+        } else {
+            act("Start", "media-playback-start-symbolic", "start", "suggested-action");
+        }
+        match u.file_state.as_str() {
+            "enabled" => act("Don't start it", "", "disable", "flat"),
+            "disabled" => act("Start it at login", "", "enable", "flat"),
+            _ => {}
+        }
+        let spacer = widgets::hbox(0);
+        spacer.set_hexpand(true);
+        self.actions.append(&spacer);
+        let more = widgets::labeled_button("document-properties-symbolic", "Details");
+        more.add_css_class("flat");
+        let (st2, e2) = (st.clone(), e.clone());
+        more.connect_clicked(move |_| page_details(&st2, &e2));
+        self.actions.append(&more);
+        self.refresh(e);
+    }
+
+    fn refresh(&self, e: &Entry) {
+        let u = &e.unit;
+        self.head.title.set_text(&title(e));
+        let starts = match u.file_state.as_str() {
+            "enabled" => "starts at login",
+            "disabled" => "doesn't start by itself",
+            "static" => "starts when something needs it",
+            "generated" => "made by the system at boot",
+            "transient" => "started for this session",
+            "" => "",
+            other => other,
+        };
+        let mut line = vec![u.name.clone()];
+        if !starts.is_empty() {
+            line.push(starts.to_string());
+        }
+        if let Some(t) = &e.timer {
+            line.push(format!("starts {}", pretty_name(&t.activates)));
+        }
+        self.head.line.set_text(&line.join(" · "));
+        let (text, class) = state_line(e, None);
+        let word = text.split(' ').next().unwrap_or("").to_string();
+        self.state.value.set_text(&word);
+        for c in ["failed", "running"] {
+            if c == class {
+                self.state.value.add_css_class(c);
+            } else {
+                self.state.value.remove_css_class(c);
+            }
+        }
+        let name = u.name.clone();
+        *self.asked.borrow_mut() = name.clone();
+        let (asked, state, ran, memory) =
+            (self.asked.clone(), self.state.sub.clone(), self.ran.clone_parts(), self.memory.clone_parts());
+        let running = u.running();
+        let failed = u.failed();
+        let scope_user = self.log.user.get();
+        cmd::background(
+            move || startup::unit_props(&name, scope_user),
+            move |p| {
+                if *asked.borrow() != p.get("Id").cloned().unwrap_or_else(|| asked.borrow().clone()) {
+                    return;
+                }
+                let since = p.get("StateChangeTimestamp").map(String::as_str).unwrap_or("");
+                state.set_text(
+                    &since.split(' ').skip(1).take(2).collect::<Vec<_>>().join(" ").chars().take(16).collect::<String>(),
+                );
+                let now = glib::monotonic_time() as f64 / 1e6;
+                let (rv, rs) = ran;
+                if running {
+                    rs.set_text("so far");
+                    rv.set_text(
+                        &mono(&p, "ActiveEnterTimestampMonotonic").map(|t| fmt::duration(now - t)).unwrap_or_else(|| "–".into()),
+                    );
+                } else {
+                    let span = mono(&p, "ExecMainStartTimestampMonotonic")
+                        .zip(mono(&p, "ExecMainExitTimestampMonotonic"))
+                        .map(|(a, b)| b - a);
+                    rs.set_text(if failed { "before it failed" } else { "last time" });
+                    rv.set_text(
+                        &span
+                            .filter(|s| *s >= 0.0)
+                            .map(|s| if s < 1.0 { "under 1 s".into() } else { fmt::duration(s) })
+                            .unwrap_or_else(|| "–".into()),
+                    );
+                }
+                let (mv, ms) = memory;
+                match p.get("MemoryCurrent").and_then(|m| m.parse::<f64>().ok()).filter(|m| *m < 1e18) {
+                    Some(m) => {
+                        mv.set_text(&fmt::bytes(m));
+                        ms.set_text("");
+                    }
+                    None => {
+                        mv.set_text("–");
+                        ms.set_text("not running");
+                    }
+                }
+            },
+        );
+    }
+}
+
+trait TileParts {
+    fn clone_parts(&self) -> (gtk::Label, gtk::Label);
+}
+
+impl TileParts for charts::Tile {
+    fn clone_parts(&self) -> (gtk::Label, gtk::Label) {
+        (self.value.clone(), self.sub.clone())
+    }
+}
+
+// ---------- The log beside it ----------
+
+struct LogPanel {
+    root: gtk::Box,
+    view: gtk::TextView,
+    unit: Rc<RefCell<String>>,
+    user: Rc<Cell<bool>>,
+    /// 0 all, 1 warnings and worse, 2 errors.
+    level: Rc<Cell<u8>>,
+    follow: gtk::Switch,
+    follower: Rc<RefCell<Option<gio::Subprocess>>>,
+}
+
+/// A journal line: when, how bad (syslog priority), what.
+fn journal_line(json: &str) -> Option<(String, u8, String)> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let msg = match &v["MESSAGE"] {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(bytes) => {
+            String::from_utf8_lossy(&bytes.iter().filter_map(|b| b.as_u64().map(|b| b as u8)).collect::<Vec<_>>()).to_string()
+        }
+        _ => return None,
+    };
+    let prio = v["PRIORITY"].as_str().and_then(|p| p.parse().ok()).unwrap_or(6);
+    let us: i64 = v["__REALTIME_TIMESTAMP"].as_str().and_then(|t| t.parse().ok()).unwrap_or(0);
+    let when = glib::DateTime::from_unix_local(us / 1_000_000)
+        .ok()
+        .and_then(|t| t.format("%H:%M:%S").ok())
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    Some((when, prio, msg))
+}
+
+fn log_panel() -> LogPanel {
+    let root = widgets::vbox(8);
+    root.set_vexpand(true);
+    let bar = widgets::hbox(10);
+    bar.add_css_class("service-log-bar");
+    bar.append(&widgets::label("Log", "graph-card-title"));
+    let level = Rc::new(Cell::new(0u8));
+    let view = gtk::TextView::new();
+    let unit: Rc<RefCell<String>> = Rc::default();
+    let user = Rc::new(Cell::new(true));
+    let follow = gtk::Switch::new();
+    let follower: Rc<RefCell<Option<gio::Subprocess>>> = Rc::default();
+    let panel_parts = (view.clone(), unit.clone(), user.clone(), level.clone(), follow.clone(), follower.clone());
+    let seg = widgets::segmented(&widgets::opts(&[("0", "All"), ("1", "Warnings"), ("2", "Errors")]), "0", move |v| {
+        let (view, unit, user, level, follow, follower) = panel_parts.clone();
+        level.set(v.parse().unwrap_or(0));
+        read_log(&view, &unit.borrow(), user.get(), level.get(), &follow, &follower);
+    });
+    seg.add_css_class("small");
+    bar.append(&seg);
+    let spacer = widgets::hbox(0);
+    spacer.set_hexpand(true);
+    bar.append(&spacer);
+    bar.append(&widgets::label("Follow", "dim"));
+    follow.set_active(true);
+    follow.set_valign(gtk::Align::Center);
+    follow.set_tooltip_text(Some("Show new lines as they're written"));
+    bar.append(&follow);
+    root.append(&bar);
+    view.set_editable(false);
+    view.set_cursor_visible(false);
+    view.set_monospace(true);
+    view.set_wrap_mode(gtk::WrapMode::WordChar);
+    view.add_css_class("code-block");
+    view.add_css_class("service-log");
+    let buf = view.buffer();
+    let p = crate::theme::palette();
+    buf.create_tag(Some("time"), &[("foreground", &p.dim_text.as_str())]);
+    buf.create_tag(Some("warn"), &[("foreground", &charts::swatch("amber").to_hex().as_str())]);
+    buf.create_tag(Some("err"), &[("foreground", &p.danger.as_str())]);
+    let scroll = gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).child(&view).build();
+    scroll.add_css_class("service-log-scroll");
+    root.append(&scroll);
+    {
+        let (view, unit, user, level, follower) = (view.clone(), unit.clone(), user.clone(), level.clone(), follower.clone());
+        follow.connect_active_notify(move |f| {
+            if f.is_active() {
+                start_follow(&view, &unit.borrow(), user.get(), level.get(), &follower);
+            } else if let Some(p) = follower.borrow_mut().take() {
+                p.force_exit();
+            }
+        });
+    }
+    let fl = follower.clone();
+    root.connect_unmap(move |_| {
+        if let Some(p) = fl.borrow_mut().take() {
+            p.force_exit();
+        }
+    });
+    LogPanel { root, view, unit, user, level, follow, follower }
+}
+
+impl LogPanel {
+    fn open(&self, unit: &str, user: bool) {
+        *self.unit.borrow_mut() = unit.to_string();
+        self.user.set(user);
+        read_log(&self.view, unit, user, self.level.get(), &self.follow, &self.follower);
+    }
+}
+
+fn append_line(buf: &gtk::TextBuffer, (when, prio, msg): &(String, u8, String), first: bool) {
+    let mut end = buf.end_iter();
+    if !first {
+        buf.insert(&mut end, "\n");
+    }
+    buf.insert_with_tags_by_name(&mut end, &format!("{when}  "), &["time"]);
+    match prio {
+        0..=3 => buf.insert_with_tags_by_name(&mut end, msg, &["err"]),
+        4 => buf.insert_with_tags_by_name(&mut end, msg, &["warn"]),
+        _ => buf.insert(&mut end, msg),
+    }
+}
+
+fn prio_arg(level: u8) -> Option<&'static str> {
+    match level {
+        1 => Some("warning"),
+        2 => Some("err"),
+        _ => None,
+    }
+}
+
+/// The last 200 lines, then new ones as they come while Follow is on.
+fn read_log(
+    view: &gtk::TextView,
+    unit: &str,
+    user: bool,
+    level: u8,
+    follow: &gtk::Switch,
+    follower: &Rc<RefCell<Option<gio::Subprocess>>>,
+) {
+    if let Some(p) = follower.borrow_mut().take() {
+        p.force_exit();
+    }
+    let buf = view.buffer();
+    buf.set_text("");
+    if unit.is_empty() {
+        return;
+    }
+    let scope = if user { "--user" } else { "--system" };
+    let mut args = vec!["journalctl", scope, "-u", unit, "-n", "200", "--no-pager", "-o", "json"];
+    if let Some(p) = prio_arg(level) {
+        args.extend(["-p", p]);
+    }
+    let (view, unit, follow, follower) = (view.clone(), unit.to_string(), follow.clone(), follower.clone());
+    cmd::run_async(&args, move |r| {
+        let buf = view.buffer();
+        let lines: Vec<(String, u8, String)> = r.map(|t| t.lines().filter_map(journal_line).collect()).unwrap_or_default();
+        if lines.is_empty() {
+            buf.set_text("No log entries.");
+        }
+        for (i, l) in lines.iter().enumerate() {
+            append_line(&buf, l, i == 0);
+        }
+        let mut end = buf.end_iter();
+        view.scroll_to_iter(&mut end, 0.0, false, 0.0, 1.0);
+        if follow.is_active() {
+            start_follow(&view, &unit, user, level, &follower);
+        }
+    });
+}
+
+fn start_follow(view: &gtk::TextView, unit: &str, user: bool, level: u8, follower: &Rc<RefCell<Option<gio::Subprocess>>>) {
+    if let Some(p) = follower.borrow_mut().take() {
+        p.force_exit();
+    }
+    if unit.is_empty() {
+        return;
+    }
+    let scope = if user { "--user" } else { "--system" };
+    let mut args = vec!["journalctl", scope, "-u", unit, "-f", "-n", "0", "-o", "json", "--no-pager"];
+    if let Some(p) = prio_arg(level) {
+        args.extend(["-p", p]);
+    }
+    let os: Vec<&std::ffi::OsStr> = args.iter().map(std::ffi::OsStr::new).collect();
+    let Ok(proc) = gio::Subprocess::newv(&os, gio::SubprocessFlags::STDOUT_PIPE | gio::SubprocessFlags::STDERR_SILENCE) else {
+        return;
+    };
+    let Some(out) = proc.stdout_pipe() else { return };
+    *follower.borrow_mut() = Some(proc.clone());
+    let stream = gio::DataInputStream::new(&out);
+    let (view, follower) = (view.clone(), follower.clone());
+    glib::spawn_future_local(async move {
+        while let Ok(Some(line)) = stream.read_line_utf8_future(glib::Priority::DEFAULT).await {
+            if follower.borrow().as_ref() != Some(&proc) {
+                break;
+            }
+            let Some(l) = journal_line(&line) else { continue };
+            let buf = view.buffer();
+            let first = buf.char_count() == 0 || buf.text(&buf.start_iter(), &buf.end_iter(), false) == "No log entries.";
+            if first {
+                buf.set_text("");
+            }
+            append_line(&buf, &l, first);
+            let mut end = buf.end_iter();
+            view.scroll_to_iter(&mut end, 0.0, false, 0.0, 1.0);
+        }
+    });
 }
 
 /// Details for a row on the page; actions refresh the list when done.
@@ -727,55 +1050,34 @@ fn show_logs(unit: &str, user: bool) {
 }
 
 pub fn build(page: &Page) {
+    page.fill();
     let p = prefs::get();
-    // One row: what, whose, which, then the filter.
+    // ----- Yours, the system's, or timers; a filter; how many -----
     let toolbar = widgets::hbox(8);
-    toolbar.add_css_class("toolbar");
-    toolbar.add_css_class("table-toolbar");
-    let kind_box = widgets::hbox(4);
-    let scope = widgets::dropdown(&widgets::opts(&[("user", "Yours"), ("system", "System")]), &p.services_scope);
-    scope.add_css_class("compact");
-    scope.set_tooltip_text(Some("Your user services, or the system's"));
-    let status = widgets::dropdown(
-        &widgets::opts(&[("all", "Any state"), ("running", "Running"), ("failed", "Failed")]),
-        &p.services_show,
-    );
-    status.add_css_class("compact");
-    status.set_tooltip_text(Some("Show only running or failed units"));
+    toolbar.add_css_class("proc-toolbar");
+    let current = if p.services_timers {
+        "timers"
+    } else if p.services_scope == "system" {
+        "system"
+    } else {
+        "user"
+    };
     let search = gtk::SearchEntry::new();
-    search.set_placeholder_text(Some("Filter"));
-    search.set_tooltip_text(Some("Filter by name or description"));
-    search.set_hexpand(true);
-    search.set_width_chars(6);
+    search.add_css_class("proc-filter");
+    search.set_placeholder_text(Some("Filter services"));
+    search.set_max_width_chars(28);
+    if let Some(icon) = search.first_child().and_downcast::<gtk::Image>() {
+        icon.set_icon_name(Some("activity-filter-symbolic"));
+    }
+    let count = widgets::label("", "proc-totals");
+    count.add_css_class("tnum");
+    count.set_ellipsize(pango::EllipsizeMode::End);
     let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
     refresh.add_css_class("flat");
     refresh.set_tooltip_text(Some("Refresh (it also refreshes by itself every few seconds)"));
-    toolbar.append(&kind_box);
-    toolbar.append(&scope);
-    toolbar.append(&status);
-    toolbar.append(&search);
-    toolbar.append(&refresh);
-    page.body.append(&toolbar);
-
-    // ----- Summary -----
-    let states = charts::stack_bar(&["Running", "Failed", "Stopped"], None);
-    // Its summary is the list's count ("12 of 106").
-    let (states_card, count) = charts::card("State", &states.root);
-    let memory = charts::bar_list(4, "No memory reading yet.", false);
-    let (memory_card, memory_sum) = charts::card("Using the most memory", &memory.root);
-    let summary = charts::row(&[states_card.upcast_ref(), memory_card.upcast_ref()], PAIR);
-    summary.add_css_class("services-summary");
-    page.body.append(&summary);
-
-    let banner = widgets::banner("", true);
-    banner.set_visible(false);
-    banner.set_margin_start(20);
-    banner.set_margin_end(16);
-    banner.set_margin_bottom(12);
-    page.body.append(&banner);
 
     let list = gtk::ListBox::new();
-    list.set_selection_mode(gtk::SelectionMode::None);
+    list.set_selection_mode(gtk::SelectionMode::Single);
     list.add_css_class("service-list");
     let scroll = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
@@ -795,109 +1097,108 @@ pub fn build(page: &Page) {
     empty.set_valign(gtk::Align::Start);
     empty.set_xalign(0.5);
     stack.add_named(&empty, Some("empty"));
-    page.body.append(&stack);
+    let side = widgets::vbox(0);
+    side.add_css_class("service-side");
+    side.append(&stack);
 
-    let show = match p.services_show.as_str() {
-        "running" => Show::Running,
-        "failed" => Show::Failed,
-        _ => Show::All,
-    };
     let st = Rc::new(State {
         user: Cell::new(p.services_scope != "system"),
         timers: Cell::new(p.services_timers),
-        show: Cell::new(show),
         query: RefCell::new(String::new()),
         entries: RefCell::new(HashMap::new()),
         rows: RefCell::new(HashMap::new()),
-        mem_labels: RefCell::new(HashMap::new()),
+        state_labels: RefCell::new(HashMap::new()),
         loading: Cell::new(false),
         list: list.clone(),
         stack: stack.clone(),
-        banner,
-        count,
-        states,
-        memory,
-        memory_sum,
+        count: count.clone(),
+        chosen: RefCell::new(String::new()),
+        detail: detail(),
+        narrow: Cell::new(false),
     });
 
-    let s2 = st.clone();
-    list.set_filter_func(move |row| s2.entries.borrow().get(row.widget_name().as_str()).is_some_and(|e| visible(&s2, e)));
-    let s2 = st.clone();
-    list.connect_row_activated(move |_, row| {
-        let e = s2.entries.borrow().get(row.widget_name().as_str()).cloned();
-        if let Some(e) = e {
-            page_details(&s2, &e);
-        }
-    });
-
-    /// A row of chips where one is selected; `selected` is the index chosen at start.
-    fn chip_group(container: &gtk::Box, items: Vec<Chip>, selected: usize) {
-        let buttons: Rc<RefCell<Vec<gtk::Button>>> = Rc::default();
-        for (i, (label, act)) in items.into_iter().enumerate() {
-            let b = gtk::Button::with_label(label);
-            b.add_css_class("chip");
-            if i == selected {
-                b.add_css_class("selected");
-            }
-            let bs = buttons.clone();
-            b.connect_clicked(move |me| {
-                for x in bs.borrow().iter() {
-                    x.remove_css_class("selected");
-                }
-                me.add_css_class("selected");
-                act();
-            });
-            container.append(&b);
-            buttons.borrow_mut().push(b);
-        }
-    }
     // Switching scope or kind starts the list over.
     let reset = |st: &Rc<State>| {
         for row in st.rows.borrow_mut().drain().map(|(_, r)| r) {
             st.list.remove(&row);
         }
-        st.mem_labels.borrow_mut().clear();
+        st.state_labels.borrow_mut().clear();
         st.entries.borrow_mut().clear();
+        st.chosen.borrow_mut().clear();
         st.stack.set_visible_child_name("loading");
         load(st, false);
     };
-    let kind = |timers: bool| {
-        let s = st.clone();
-        Rc::new(move || {
-            s.timers.set(timers);
-            prefs::update(|p| p.services_timers = timers);
-            reset(&s);
-        }) as Rc<dyn Fn()>
-    };
-    chip_group(&kind_box, vec![("Services", kind(false)), ("Timers", kind(true))], st.timers.get() as usize);
     let s = st.clone();
-    scope.connect_selected_notify(move |d| {
-        let user = d.selected() == 0;
-        if s.user.get() == user {
+    let switch =
+        widgets::segmented(&widgets::opts(&[("user", "Yours"), ("system", "System"), ("timers", "Timers")]), current, move |v| {
+            let (user, timers) = match v.as_str() {
+                "system" => (false, false),
+                "timers" => (true, true),
+                _ => (true, false),
+            };
+            s.user.set(user);
+            s.timers.set(timers);
+            prefs::update(|p| {
+                p.services_scope = if user { "user" } else { "system" }.into();
+                p.services_timers = timers;
+            });
+            reset(&s);
+        });
+    toolbar.append(&switch);
+    toolbar.append(&search);
+    let spacer = widgets::hbox(0);
+    spacer.set_hexpand(true);
+    toolbar.append(&spacer);
+    toolbar.append(&count);
+    toolbar.append(&refresh);
+    page.body.append(&toolbar);
+
+    let cols = widgets::hbox(0);
+    cols.set_vexpand(true);
+    cols.append(&side);
+    cols.append(&st.detail.root);
+    page.body.append(&cols);
+
+    let s2 = st.clone();
+    list.set_filter_func(move |row| s2.entries.borrow().get(row.widget_name().as_str()).is_some_and(|e| visible(&s2, e)));
+    let s2 = st.clone();
+    list.connect_row_selected(move |_, row| {
+        let Some(row) = row else { return };
+        let e = s2.entries.borrow().get(row.widget_name().as_str()).cloned();
+        if let Some(e) = e
+            && *s2.chosen.borrow() != e.unit.name
+        {
+            choose(&s2, &e);
+        }
+    });
+    // In a narrow window the list is alone; a row opens the service on its own.
+    let s2 = st.clone();
+    list.connect_row_activated(move |_, row| {
+        if !s2.narrow.get() {
             return;
         }
-        s.user.set(user);
-        prefs::update(|p| p.services_scope = if user { "user" } else { "system" }.into());
-        reset(&s);
+        let e = s2.entries.borrow().get(row.widget_name().as_str()).cloned();
+        if let Some(e) = e {
+            let log_unit = e.timer.as_ref().map_or(e.unit.name.clone(), |t| t.activates.clone());
+            show_logs(&log_unit, s2.user.get());
+        }
     });
-    let s = st.clone();
-    status.connect_selected_notify(move |d| {
-        let show = match d.selected() {
-            1 => Show::Running,
-            2 => Show::Failed,
-            _ => Show::All,
-        };
-        s.show.set(show);
-        prefs::update(|p| p.services_show = show.id().into());
-        s.list.invalidate_filter();
-        refresh_count(&s);
-    });
+    let fit = {
+        let (st, side) = (st.clone(), side.clone());
+        move |b: &gtk::Box| {
+            let narrow = b.has_css_class("narrow");
+            st.narrow.set(narrow);
+            st.detail.root.set_visible(!narrow);
+            side.set_hexpand(narrow);
+        }
+    };
+    fit(&page.body);
+    page.body.connect_css_classes_notify(fit);
 
     let s2 = st.clone();
     search.connect_search_changed(move |e| {
         *s2.query.borrow_mut() = e.text().trim().to_lowercase();
         s2.list.invalidate_filter();
-        refresh_count(&s2);
     });
     let s2 = st.clone();
     refresh.connect_clicked(move |_| load(&s2, false));
@@ -913,5 +1214,7 @@ pub fn build(page: &Page) {
         }
         glib::ControlFlow::Continue
     });
+    let s2 = st.clone();
+    live::on_tick(&list, move |_| refresh_states(&s2));
     load(&st, false);
 }

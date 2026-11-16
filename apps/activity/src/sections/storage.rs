@@ -1,15 +1,15 @@
-use super::top::{self, By};
-use crate::charts::{self, PAIR};
+use crate::charts::{self};
 use crate::graph::{self, Scale, Series, Tone};
 use crate::sampler::disk::{Disk, Mount};
 use crate::widgets::{self, Page};
-use crate::{cmd, fmt, live};
+use crate::{cmd, fmt, live, parts, prefs};
 use gtk::pango;
 use gtk::prelude::*;
+use std::rc::Rc;
 
 fn kind(d: &Disk) -> &'static str {
     if d.name.starts_with("nvme") {
-        "NVMe SSD"
+        "NVMe"
     } else if d.removable {
         "Removable"
     } else if d.rotational {
@@ -19,32 +19,19 @@ fn kind(d: &Disk) -> &'static str {
     }
 }
 
-/// A mounted filesystem: how full it is as a ring, with its path and free space.
-fn mount_card(m: &Mount) -> (gtk::Box, charts::Ring, gtk::Label) {
-    let card = widgets::hbox(14);
-    card.add_css_class("graph-card");
-    let ring = charts::ring(72);
-    card.append(&ring.root);
-    let text = widgets::vbox(2);
-    text.set_hexpand(true);
-    text.set_valign(gtk::Align::Center);
-    let path = widgets::label(&m.path, "graph-card-title");
-    path.set_ellipsize(pango::EllipsizeMode::Middle);
-    text.append(&path);
-    let detail = widgets::label("", "dim");
-    detail.add_css_class("tnum");
-    text.append(&detail);
-    text.append(&widgets::label(&format!("{} · {}", m.fs, m.device.rsplit('/').next().unwrap_or(&m.device)), "stat-sub"));
-    card.append(&text);
-    let open = gtk::Button::from_icon_name("folder-open-symbolic");
-    open.add_css_class("flat");
-    open.set_valign(gtk::Align::Center);
-    open.set_tooltip_text(Some("Open in the file manager"));
-    let target = m.path.clone();
-    open.connect_clicked(move |_| cmd::spawn(&["xdg-open", &target]));
-    card.append(&open);
-    card.set_tooltip_text(Some(&format!("{} · {}", m.device, m.fs)));
-    (card, ring, detail)
+/// A disk's places, once each: btrfs subvolumes and bind mounts of one filesystem
+/// share its space, so it's shown under its shortest path ("/", not "/var/log").
+pub fn places(d: &Disk) -> Vec<&Mount> {
+    let mut out: Vec<&Mount> = Vec::new();
+    for m in d.mounts.iter().filter(|m| m.total > 0) {
+        match out.iter_mut().find(|o| o.device == m.device) {
+            Some(o) if m.path.len() < o.path.len() => *o = m,
+            Some(_) => {}
+            None => out.push(m),
+        }
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    out
 }
 
 pub fn build(page: &Page) {
@@ -56,46 +43,74 @@ pub fn build(page: &Page) {
             holder.append(&widgets::banner("No disks were found in <tt>/sys/block</tt>.", true));
             return;
         }
-        let consumers = overall(&page);
-        for d in &snap.disks {
-            disk_section(&page, d);
+        let g = page.cards("");
+        overall(&g);
+        let full = Rc::new(parts::note());
+        for (i, d) in snap.disks.iter().enumerate() {
+            g.add(&disk_card(i, d));
         }
-        let activity = page.cards("Activity");
-        activity.add(&consumers);
-        let gr = graph::graph(vec![Series::new("io.psi", "Waiting", Tone::Accent)], Scale::Auto { floor: 10.0 }, fmt::pct, 120);
-        let (pressure, _) = charts::card("Waiting on disk", &gr.root);
-        activity.add(&widgets::disclosure("storage.pressure", "Disk pressure history", &pressure));
+        g.add(&full.root);
+        let f = full.clone();
+        live::on_tick(&full.root, move |s| {
+            let full = &f;
+            let warn = prefs::get().warn_disk;
+            let fullest = s
+                .disks
+                .iter()
+                .flat_map(places)
+                .map(|m| (m, m.used() as f64 / m.total as f64 * 100.0))
+                .filter(|(_, p)| *p >= warn)
+                .max_by(|a, b| a.1.total_cmp(&b.1));
+            match fullest {
+                Some((m, p)) => full.set(
+                    "drive-harddisk-symbolic",
+                    if p >= 98.0 { parts::Tone::Bad } else { parts::Tone::Warn },
+                    &format!("{} is {} full", m.path, fmt::pct(p)),
+                    &format!("{} left of {}.", fmt::bytes(m.free as f64), fmt::bytes(m.total as f64)),
+                ),
+                None => full.hide(),
+            }
+        });
+        let target: Rc<std::cell::RefCell<String>> = Rc::default();
+        {
+            let target = target.clone();
+            full.on_action("Open", move || {
+                let t = target.borrow().clone();
+                if !t.is_empty() {
+                    cmd::spawn(&["xdg-open", &t]);
+                }
+            });
+        }
+        live::on_tick(&full.action, move |s| {
+            let warn = prefs::get().warn_disk;
+            if let Some(m) = s.disks.iter().flat_map(places).find(|m| m.used() as f64 / m.total as f64 * 100.0 >= warn) {
+                *target.borrow_mut() = m.path.clone();
+            }
+        });
     });
 }
 
-/// Every disk together, and who's reading and writing.
-fn overall(page: &Page) -> gtk::Box {
-    let g = page.cards("All disks");
+/// Every disk together.
+fn overall(g: &widgets::Group) {
     let read = charts::tile("Reading");
     let write = charts::tile("Writing");
     let busy = charts::tile("Busiest disk");
     let psi = charts::tile("Waiting on disk");
     psi.root.set_tooltip_text(Some("How much of the time programs were held up waiting for the disks"));
-    g.add(&charts::row(&[read.root.upcast_ref(), write.root.upcast_ref(), busy.root.upcast_ref(), psi.root.upcast_ref()], 150));
-
-    let procs = charts::bar_list(8, "Nothing is reading or writing.", true);
-    let (procs_card, _) = charts::card("Busiest processes", &procs.root);
-    let apps = charts::bar_list(8, "Nothing is reading or writing.", true);
-    let (apps_card, _) = charts::card("Busiest apps and services", &apps.root);
-    let consumers = widgets::consumers("storage", ("Apps", &apps_card), ("Processes", &procs_card));
-
-    live::on_tick(&read.root, move |s| {
+    let strip = parts::readings(&[&read, &write, &busy, &psi]);
+    g.add(&strip);
+    live::on_tick(&strip, move |s| {
         read.value.set_text(&fmt::rate(s.disk_read()));
-        read.sub.set_text(&format!("{} read since boot", fmt::bytes(s.disks.iter().map(|d| d.read_total as f64).sum())));
+        read.sub.set_text(&format!("{} since boot", fmt::bytes(s.disks.iter().map(|d| d.read_total as f64).sum())));
         write.value.set_text(&fmt::rate(s.disk_write()));
-        write.sub.set_text(&format!("{} written since boot", fmt::bytes(s.disks.iter().map(|d| d.written_total as f64).sum())));
+        write.sub.set_text(&format!("{} since boot", fmt::bytes(s.disks.iter().map(|d| d.written_total as f64).sum())));
         busy.value.set_text(&fmt::pct(s.disk_busy()));
-        let top = s.disks.iter().max_by(|a, b| a.busy.total_cmp(&b.busy));
-        busy.sub.set_text(&top.map(|d| d.name.clone()).unwrap_or_default());
+        let top = s.disks.iter().enumerate().max_by(|a, b| a.1.busy.total_cmp(&b.1.busy));
+        busy.sub.set_text(&top.map(|(i, _)| format!("Disk {i}")).unwrap_or_default());
         match s.io_pressure {
             Some(p) => {
                 psi.value.set_text(&fmt::pct(p.some10));
-                psi.sub.set_text(&format!("stalled · fully {}", fmt::pct(p.full10)));
+                psi.sub.set_text("held up, last 10 s");
                 widgets::set_warn(&psi.value, p.some10 >= 10.0);
             }
             None => {
@@ -104,133 +119,147 @@ fn overall(page: &Page) -> gtk::Box {
             }
         }
     });
-    live::on_tick(&g.list, move |s| {
-        procs.set(&top::procs(s, By::Io, 8, None));
-        apps.set(&top::groups(s, By::Io, 8, None));
-    });
-    consumers
 }
 
-fn disk_section(page: &Page, d: &Disk) {
-    let g = page.cards(&format!("{} · {}", d.model, d.name));
+/// A disk: how full each of its places is, then a short graph of its reading and
+/// writing beside how busy it is.
+fn disk_card(i: usize, d: &Disk) -> gtk::Box {
+    let c = parts::card("drive-harddisk-symbolic", &format!("Disk {i}"));
+    c.meta.set_text(&format!("{} · {} · {}", d.model, fmt::bytes(d.size as f64), kind(d)));
+    c.meta.set_tooltip_text(Some(&format!("{} ({})", d.model, d.name)));
+    let temp = widgets::label("", "page-card-meta");
+    temp.add_css_class("tnum");
+    c.head.append(&temp);
     let name = d.name.clone();
 
+    // ----- Its places -----
+    let rows = gtk::Grid::new();
+    rows.set_column_spacing(14);
+    rows.set_row_spacing(8);
+    rows.add_css_class("disk-places");
+    let mut cells = Vec::new();
+    for (r, m) in places(d).iter().enumerate() {
+        let path = widgets::label(&m.path, "disk-place");
+        path.set_xalign(0.0);
+        path.set_ellipsize(pango::EllipsizeMode::Middle);
+        path.set_width_chars(14);
+        path.set_max_width_chars(24);
+        path.set_tooltip_text(Some(&format!("{} · {} · {}", m.path, m.fs, m.device)));
+        let state = Rc::new(std::cell::Cell::new((0.0f64, 0u8)));
+        let bar = gtk::DrawingArea::new();
+        bar.set_content_height(6);
+        bar.set_hexpand(true);
+        bar.set_valign(gtk::Align::Center);
+        {
+            let state = state.clone();
+            bar.set_draw_func(move |_, cr, w, h| {
+                let (w, h) = (w as f64, h as f64);
+                let p = crate::theme::palette();
+                let t = crate::theme::Rgb::hex(&p.text);
+                rounded(cr, 0.0, 0.0, w, h, h / 2.0);
+                cr.set_source_rgba(t.0, t.1, t.2, 0.08);
+                let _ = cr.fill();
+                let (f, level) = state.get();
+                let fw = f.clamp(0.0, 1.0) * w;
+                if fw > 0.0 {
+                    rounded(cr, 0.0, 0.0, fw.max(h), h, h / 2.0);
+                    let c = match level {
+                        2 => crate::theme::Rgb::hex(&p.danger),
+                        1 => charts::swatch("amber"),
+                        _ => charts::swatch("blue"),
+                    };
+                    cr.set_source_rgb(c.0, c.1, c.2);
+                    let _ = cr.fill();
+                }
+            });
+        }
+        let value = widgets::label("", "disk-place-value");
+        value.add_css_class("tnum");
+        value.set_xalign(1.0);
+        let open = gtk::Button::from_icon_name("folder-open-symbolic");
+        open.add_css_class("flat");
+        open.add_css_class("disk-open");
+        open.set_tooltip_text(Some("Open in the file manager"));
+        let target = m.path.clone();
+        open.connect_clicked(move |_| cmd::spawn(&["xdg-open", &target]));
+        rows.attach(&path, 0, r as i32, 1, 1);
+        rows.attach(&bar, 1, r as i32, 1, 1);
+        rows.attach(&value, 2, r as i32, 1, 1);
+        rows.attach(&open, 3, r as i32, 1, 1);
+        cells.push((m.device.clone(), state, bar, value));
+    }
+    if cells.is_empty() {
+        let none = widgets::label("Nothing on it is mounted.", "dim");
+        none.set_xalign(0.0);
+        c.root.append(&none);
+    } else {
+        c.root.append(&rows);
+    }
+
+    // ----- Reading and writing -----
     let gr = graph::graph(
         vec![
-            Series::new(format!("disk.{name}.read"), "Read", Tone::Accent),
-            Series::new(format!("disk.{name}.write"), "Write", Tone::Second),
+            Series::new(format!("disk.{name}.write"), "Write", Tone::Swatch("teal")),
+            Series { dashed: true, ..Series::new(format!("disk.{name}.read"), "Read", Tone::Swatch("blue")) },
         ],
         Scale::Auto { floor: 1024.0 * 1024.0 },
         fmt::rate,
-        120,
+        56,
     );
-    let (tp_card, tp_sum) = charts::card("Throughput", &gr.root);
-    let gr = graph::graph(
-        vec![
-            Series::new(format!("disk.{name}.riops"), "Reads", Tone::Accent),
-            Series::new(format!("disk.{name}.wiops"), "Writes", Tone::Second),
-        ],
-        Scale::Auto { floor: 100.0 },
-        fmt::per_sec,
-        120,
+    if let Some(legend) = gr.root.first_child() {
+        legend.set_visible(false);
+    }
+    let read = charts::tile("Read");
+    let write = charts::tile("Write");
+    let busy = charts::tile("Busy");
+    let latency = charts::tile("Response");
+    let nums = charts::flow_row(
+        &[read.root.upcast_ref(), write.root.upcast_ref(), busy.root.upcast_ref(), latency.root.upcast_ref()],
+        84,
+        4,
+        true,
     );
-    let (iops_card, iops_sum) = charts::card("Requests", &gr.root);
-    g.add(&tp_card);
+    nums.add_css_class("metric-strip");
+    nums.add_css_class("disk-nums");
+    nums.set_valign(gtk::Align::Center);
+    gr.root.add_css_class("disk-graph");
+    c.root.append(&charts::flow_row(&[gr.root.upcast_ref(), nums.upcast_ref()], 300, 2, true));
 
-    let active = charts::tile("Active time");
-    let latency = charts::tile("Response time");
-    let space = charts::tile("Space used");
-    let temp = charts::tile("Temperature");
-    g.add(&charts::row(
-        &[active.root.upcast_ref(), latency.root.upcast_ref(), space.root.upcast_ref(), temp.root.upcast_ref()],
-        150,
-    ));
-
-    // ----- Filesystems on it -----
-    let mut mounts = Vec::new();
-    let mut cards: Vec<gtk::Widget> = Vec::new();
-    for m in &d.mounts {
-        let (card, ring, detail) = mount_card(m);
-        cards.push(card.upcast());
-        mounts.push((m.path.clone(), ring, detail));
-    }
-    if !cards.is_empty() {
-        let refs: Vec<&gtk::Widget> = cards.iter().collect();
-        g.add(&charts::row(&refs, 260));
-    }
-
-    // ----- The drive -----
-    let spec = widgets::vbox(0);
-    spec.add_css_class("graph-card");
-    spec.add_css_class("spec-card");
-    let (flow, v) = widgets::kv_flow(&["Type", "Size", "Interface", "Firmware", "Read since boot", "Written since boot"]);
-    spec.append(&flow);
-    let diagnostics = widgets::vbox(12);
-    diagnostics.append(&iops_card);
-    let active_history =
-        graph::graph(vec![Series::new(format!("disk.{name}.busy"), "Active", Tone::Accent)], Scale::Percent, fmt::pct, 120);
-    let (active_history, _) = charts::card("Active time", &active_history.root);
-    let latency_history = graph::graph(
-        vec![Series::new(format!("disk.{name}.lat"), "Response", Tone::Accent)],
-        Scale::Auto { floor: 1.0 },
-        fmt::ms,
-        120,
-    );
-    let (latency_history, _) = charts::card("Response time", &latency_history.root);
-    diagnostics.append(&charts::row(&[active_history.upcast_ref(), latency_history.upcast_ref()], PAIR));
-    diagnostics.append(&spec);
-    g.add(&widgets::disclosure(&format!("storage.{name}.details"), "Requests and drive details", &diagnostics));
-    let static_info = [
-        kind(d).to_string(),
-        fmt::bytes(d.size as f64),
-        if d.transport.is_empty() { "–".into() } else { d.transport.clone() },
-        if d.firmware.is_empty() { "–".into() } else { d.firmware.clone() },
-    ];
-    for (l, t) in v.iter().zip(&static_info) {
-        l.set_text(t);
-    }
-
-    live::on_tick(&tp_card, move |s| {
+    live::on_tick(&c.root, move |s| {
         let Some(d) = s.disks.iter().find(|x| x.name == name) else { return };
-        tp_sum.set_text(&format!("{} active", fmt::pct(d.busy)));
-        iops_sum.set_text(&format!("{} total", fmt::per_sec(d.read_iops + d.write_iops)));
-        active.value.set_text(&fmt::pct(d.busy));
-        active.sub.set_text(&format!("↓ {} · ↑ {}", fmt::rate(d.read_bps), fmt::rate(d.write_bps)));
+        temp.set_text(&d.temp.map(fmt::temp).unwrap_or_default());
+        read.value.set_text(&fmt::rate(d.read_bps));
+        write.value.set_text(&fmt::rate(d.write_bps));
+        busy.value.set_text(&fmt::pct(d.busy));
         latency.value.set_text(&if d.read_iops + d.write_iops > 0.0 { fmt::ms(d.latency_ms) } else { "–".into() });
-        latency.sub.set_text(&format!("per request · {:.2} queued", d.queue));
-        // How full the drive's filesystems are, together.
-        let (used, total) = d.mounts.iter().fold((0u64, 0u64), |(u, t), m| (u + m.used(), t + m.total));
-        if total > 0 {
-            let f = used as f64 / total as f64;
-            space.value.set_text(&fmt::bytes(used as f64));
-            space.sub.set_text(&format!("of {} mounted", fmt::bytes(total as f64)));
-            widgets::set_warn(&space.value, f * 100.0 >= crate::prefs::get().warn_disk);
-        } else {
-            space.value.set_text("–");
-            space.sub.set_text("nothing mounted");
-        }
-        match d.temp {
-            Some(t) => {
-                temp.value.set_text(&fmt::temp(t));
-                temp.sub.set_text("controller");
-                let hot = t >= crate::prefs::get().warn_temp;
-                widgets::set_warn(&temp.value, hot);
+        let warn = prefs::get().warn_disk;
+        for (dev, state, bar, value) in &cells {
+            let Some(m) = d.mounts.iter().find(|m| &m.device == dev && m.total > 0) else { continue };
+            let f = m.used() as f64 / m.total as f64;
+            let level = if f * 100.0 >= warn.max(95.0) {
+                2
+            } else if f * 100.0 >= warn {
+                1
+            } else {
+                0
+            };
+            if state.get() != (f, level) {
+                state.set((f, level));
+                bar.queue_draw();
             }
-            None => {
-                temp.value.set_text("–");
-                temp.sub.set_text("not reported");
-            }
-        }
-        v[4].set_text(&fmt::bytes(d.read_total as f64));
-        v[5].set_text(&fmt::bytes(d.written_total as f64));
-        for (path, ring, detail) in &mounts {
-            if let Some(m) = d.mounts.iter().find(|m| &m.path == path)
-                && m.total > 0
-            {
-                let full = m.used() as f64 / m.total as f64;
-                ring.set(full, &fmt::pct(full * 100.0), "", full * 100.0 >= crate::prefs::get().warn_disk);
-                detail.set_text(&format!("{} free of {}", fmt::bytes(m.free as f64), fmt::bytes(m.total as f64)));
-            }
+            value.set_text(&super::dashboard::used_of(m.used() as f64, m.total as f64));
         }
     });
+    c.root
+}
+
+fn rounded(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
+    use std::f64::consts::{FRAC_PI_2, PI};
+    let r = r.min(h / 2.0).min(w / 2.0).max(0.0);
+    cr.new_sub_path();
+    cr.arc(x + w - r, y + r, r, -FRAC_PI_2, 0.0);
+    cr.arc(x + w - r, y + h - r, r, 0.0, FRAC_PI_2);
+    cr.arc(x + r, y + h - r, r, FRAC_PI_2, PI);
+    cr.arc(x + r, y + r, r, PI, 3.0 * FRAC_PI_2);
+    cr.close_path();
 }

@@ -143,12 +143,6 @@ window.activity-window .app-header button.bar-button.dash-edit {
   margin: 0;
 }
 
-window.activity-window button.group-action {
-  min-height: 26px;
-  min-width: 26px;
-  padding: 0 4px;
-}
-
 .priority-custom {
   margin-top: 10px;
   padding: 6px 4px 2px;
@@ -288,44 +282,6 @@ window.activity-window dropdown > button {
   color: @theme_text;
 }
 
-/* Each thread: small cards, as graphs or as a heat grid. */
-.core-cell {
-  background: @theme_card;
-  border-radius: var(--nyx-radius-small);
-  padding: 6px 8px 4px;
-  min-width: 96px;
-}
-
-.core-cell .core-name {
-  font-size: 11px;
-  font-weight: 600;
-  color: @theme_text_tertiary;
-}
-
-.core-cell .core-value {
-  font-size: 12px;
-  color: @theme_text;
-}
-
-.core-tile {
-  background: @theme_card;
-  border-radius: var(--nyx-radius-small);
-  padding: 6px 8px;
-  min-width: 58px;
-}
-
-.core-tile .core-value { font-size: 13px; font-weight: 600; }
-
-.core-tile.heat-1 { background: mix(@theme_card, @theme_accent, 0.08); }
-
-.core-tile.heat-2 { background: mix(@theme_card, @theme_accent, 0.16); }
-
-.core-tile.heat-3 { background: mix(@theme_card, @theme_accent, 0.26); }
-
-.core-tile.heat-4 { background: mix(@theme_card, @theme_accent, 0.38); }
-
-.core-tile.heat-5 { background: mix(@theme_card, @theme_accent, 0.52); }
-
 /* ---------- Charts ---------- */
 
 .card-row,
@@ -339,70 +295,10 @@ window.activity-window dropdown > button {
   min-width: 120px;
 }
 
-.ring-value {
-  font-size: 20px;
-  font-weight: 600;
-  color: @theme_text;
-}
-
-.ring-value.small {
-  font-size: 14px;
-}
-
-.ring-sub {
-  font-size: 11px;
-  color: @theme_dim_text;
-}
-
-.chart-legend {
-  font-size: 12.5px;
-}
-
-.bar-list {
-  margin: 0 -6px;
-}
-
-window.activity-window button.bar-row {
-  min-height: 28px;
-  padding: 0 6px;
-  border-radius: var(--nyx-radius-small);
-  background: transparent;
-  box-shadow: none;
-}
-
-window.activity-window button.bar-row:not(.clickable):hover {
-  background: transparent;
-}
-
-.bar-name {
-  font-size: 12.5px;
-  color: @theme_text;
-}
-
-.bar-value {
-  font-size: 12.5px;
-  color: @theme_dim_text;
-}
-
-.subgroup-title {
-  margin: 6px 2px 0;
-  font-size: 12px;
-  font-weight: 600;
-  color: @theme_dim_text;
-}
-
 .settings-option.startup-row,
 .settings-option.service-row {
   padding-top: 8px;
   padding-bottom: 8px;
-}
-
-.port-row {
-  min-height: 26px;
-}
-
-.spec-card .kv-key {
-  font-size: 11px;
 }
 
 /* ---------- Key figures ---------- */
@@ -533,7 +429,6 @@ window.activity-window button.tree-expander:hover {
   background: @row_hover;
 }
 
-
 window.activity-window list.service-list,
 window.activity-window list.table-card {
   background: transparent;
@@ -573,11 +468,6 @@ window.activity-window .service-row menubutton > button:hover {
   background: @row_hover;
 }
 
-.service-name {
-  font-weight: 500;
-  color: @theme_text;
-}
-
 .state-dot {
   min-width: 8px;
   min-height: 8px;
@@ -591,10 +481,6 @@ window.activity-window .service-row menubutton > button:hover {
 
 .state-dot.failed {
   background: @theme_danger;
-}
-
-.services-summary {
-  margin: 4px 16px 12px;
 }
 
 window.activity-window dropdown.compact > button {
@@ -644,61 +530,13 @@ window.activity-window .settings-page.narrow {
   color: mix(@theme_dim_text, @theme_text, 0.15);
 }
 
-.stat-title,
-window.activity-window .usage-summary .legend-label {
+.stat-title {
   color: mix(@theme_dim_text, @theme_text, 0.15);
-}
-
-.usage-summary .chart-legend {
-  font-size: 11.5px;
-}
-
-.usage-summary .legend-value {
-  font-weight: 500;
 }
 
 window.activity-window .nav-readout {
   color: @theme_dim_text;
   font-weight: 400;
-}
-
-window.activity-window .bar-name {
-  font-weight: 400;
-}
-
-.ranking-empty {
-  padding: 12px 0;
-}
-
-window.activity-window button.ranking-more {
-  min-height: 26px;
-  padding: 0 6px;
-  margin-top: 4px;
-  font-size: 11.5px;
-  color: @theme_dim_text;
-}
-
-.diagnostic-group {
-  margin-top: 12px;
-}
-
-.diagnostic-group > title {
-  padding: 8px 2px;
-  color: @theme_dim_text;
-  font-size: 12.5px;
-  font-weight: 500;
-}
-
-.diagnostic-group > title:hover {
-  color: @theme_text;
-}
-
-.diagnostic-group > box {
-  margin-top: 6px;
-}
-
-.services-summary .graph-card {
-  padding: 10px 14px;
 }
 
 window.activity-window .settings-page.fill,
@@ -970,6 +808,33 @@ window.activity-window columnview.proc-table > listview > header {
   color: @theme_dim_text;
 }
 
+/* Nothing chosen: the summary. */
+.insp-summary > .insp-head {
+  padding: 14px 0 4px;
+}
+
+.insp-summary .insp-title {
+  font-size: 15px;
+}
+
+.insp-split {
+  padding: 12px;
+}
+
+.insp-split .dash-key {
+  font-size: 12px;
+}
+
+window.activity-window button.insp-started {
+  border-radius: 0;
+  background: transparent;
+  font-weight: normal;
+}
+
+window.activity-window button.insp-started:hover {
+  background: alpha(@theme_text, 0.05);
+}
+
 window.activity-window label.insp-value.mono {
   font-family: inherit;
 }
@@ -1132,14 +997,52 @@ window.activity-window button.dash-more:hover {
   background: alpha(@theme_accent, 0.1);
 }
 
+window.activity-window button.dash-more.dash-chevron {
+  min-width: 22px;
+  padding: 0;
+  color: @theme_text_tertiary;
+}
+
+window.activity-window button.dash-more.dash-chevron:hover {
+  background: alpha(@theme_text, 0.06);
+}
+
+.dash-card.opens:hover {
+  border-color: alpha(@theme_text, 0.16);
+}
+
+.dash-graph .graph-plot {
+  min-height: 48px;
+}
+
+/* Several problems: one strip that opens to them. */
+.dash-strip .dash-alert-title {
+  font-size: 13px;
+}
+
+.dash-dot {
+  min-width: 7px;
+  min-height: 7px;
+  border-radius: 99px;
+  background: @theme_warning;
+}
+
+.dash-dot.bad {
+  background: @theme_danger;
+}
+
 window.activity-window button.dash-hide {
   min-height: 24px;
   min-width: 24px;
   margin: -4px -6px -4px 0;
 }
 
+.dash-big .stat-title {
+  font-size: 10.5px;
+}
+
 .dash-value {
-  font-size: 22px;
+  font-size: 20px;
   font-weight: 600;
   letter-spacing: -0.015em;
 }
@@ -1171,43 +1074,6 @@ window.activity-window button.dash-hide {
 
 .dash-sensor-value {
   font-weight: 500;
-}
-
-window.activity-window button.dash-app {
-  min-height: 30px;
-  padding: 0 4px;
-  margin: 0 -4px;
-  border-radius: var(--nyx-radius-small);
-  background: transparent;
-  box-shadow: none;
-}
-
-window.activity-window button.dash-app:hover {
-  background: @row_hover;
-}
-
-.dash-app-name {
-  font-size: 12.5px;
-  font-weight: 400;
-}
-
-.dash-app-value {
-  font-size: 12px;
-  color: @theme_dim_text;
-}
-
-/* The swatch class sets the colour; the tile wears it. */
-.app-letter {
-  min-width: 22px;
-  min-height: 22px;
-  border-radius: 6px;
-  background-color: currentColor;
-}
-
-.app-letter > label {
-  color: white;
-  font-size: 11px;
-  font-weight: 700;
 }
 
 .dash-startup-item {
@@ -1282,4 +1148,297 @@ window.activity-window button.dash-app:hover {
 .dash-editor-foot {
   padding: 10px 16px;
   border-top: 1px solid @divider;
+}
+
+/* ---------- Pages ---------- */
+
+.page-head {
+  margin-bottom: 2px;
+}
+
+.page-head-title {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.page-head-line {
+  font-size: 12.5px;
+  color: @theme_text_tertiary;
+}
+
+.page-card-head {
+  min-height: 24px;
+}
+
+.page-card-icon {
+  color: @theme_dim_text;
+}
+
+.page-card-meta {
+  font-size: 12px;
+  color: @theme_text_tertiary;
+  margin-left: 2px;
+}
+
+.dash-alert.plain .dash-alert-icon {
+  color: @theme_dim_text;
+}
+
+window.activity-window button.app-row {
+  min-height: 34px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: transparent;
+  font-weight: normal;
+}
+
+window.activity-window button.app-row.clickable:hover {
+  background: alpha(@theme_text, 0.05);
+}
+
+.app-row-name {
+  font-size: 13px;
+}
+
+.app-row-value {
+  font-size: 13px;
+}
+
+.app-list-empty {
+  padding: 8px 4px;
+  font-size: 12.5px;
+}
+
+.proc-face.app-row .app-tile {
+  border-radius: 6px;
+}
+
+.proc-face.app-row .app-tile > label {
+  font-size: 11px;
+}
+
+.thread-bars {
+  min-height: 90px;
+}
+
+.thread-bar {
+  border-radius: 4px;
+}
+
+.thread-value {
+  font-size: 10px;
+  color: @theme_text_tertiary;
+}
+
+.page-card-good {
+  font-size: 12px;
+  color: @theme_success;
+}
+
+.disk-place,
+.disk-place-value {
+  font-size: 12.5px;
+}
+
+.disk-place-value {
+  color: @theme_dim_text;
+}
+
+window.activity-window button.disk-open {
+  min-height: 22px;
+  min-width: 22px;
+  padding: 0;
+  margin: -4px 0;
+  color: @theme_text_tertiary;
+}
+
+.metric-strip.disk-nums {
+  padding: 0 4px;
+}
+
+.disk-nums .metric-reading {
+  min-width: 70px;
+}
+
+.net-lanes {
+  padding: 14px 16px 10px;
+}
+
+.net-lane-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.net-lane-sub {
+  font-size: 11.5px;
+  color: @theme_text_tertiary;
+}
+
+.net-flat {
+  min-height: 1px;
+  background: alpha(@theme_text, 0.16);
+}
+
+.kv-row {
+  min-height: 32px;
+}
+
+.kv-row + .kv-row {
+  border-top: 1px solid @hairline;
+}
+
+.kv-key {
+  font-size: 12.5px;
+  color: @theme_dim_text;
+}
+
+.kv-value {
+  font-size: 12.5px;
+}
+
+.page-card > .metric-strip {
+  padding: 0 4px 6px;
+  background: transparent;
+}
+
+.gpu-state {
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-size: 11.5px;
+  font-weight: 600;
+  background: alpha(@theme_text, 0.08);
+  color: @theme_dim_text;
+}
+
+.gpu-state.on {
+  background: alpha(@theme_success, 0.16);
+  color: @theme_success;
+}
+
+.temp-row + .temp-row {
+  margin-top: 8px;
+}
+
+.temp-name {
+  font-size: 12.5px;
+}
+
+.temp-value {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.temp-value.warn {
+  color: @theme_warning;
+}
+
+.temp-value.bad {
+  color: @theme_danger;
+}
+
+.temp-limit {
+  font-size: 11.5px;
+  color: @theme_text_tertiary;
+}
+
+.page-card-line {
+  font-size: 12.5px;
+  color: @theme_dim_text;
+}
+
+.startup-list {
+  padding: 4px 16px;
+}
+
+.startup-row {
+  min-height: 52px;
+}
+
+.startup-row + .startup-row {
+  border-top: 1px solid @hairline;
+}
+
+.startup-name {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.startup-what {
+  font-size: 11.5px;
+  color: @theme_text_tertiary;
+}
+
+.startup-time {
+  font-size: 12.5px;
+  color: @theme_dim_text;
+}
+
+.startup-time.slow {
+  color: @theme_danger;
+  font-weight: 600;
+}
+
+.service-side {
+  min-width: 340px;
+  border-right: 1px solid @divider;
+}
+
+.page-services.narrow .service-side {
+  border-right: none;
+}
+
+.service-row {
+  min-height: 46px;
+  padding: 0 12px 0 4px;
+}
+
+.service-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.service-unit {
+  font-family: monospace;
+  font-size: 11px;
+  color: @theme_text_tertiary;
+}
+
+.service-state {
+  font-size: 12px;
+  color: @theme_dim_text;
+}
+
+.service-state.running {
+  color: @theme_success;
+}
+
+.service-state.failed {
+  color: @theme_danger;
+}
+
+.service-detail {
+  padding: 16px 18px;
+}
+
+.service-detail .stat-value.failed {
+  color: @theme_danger;
+}
+
+.service-detail .stat-value.running {
+  color: @theme_success;
+}
+
+.service-log-scroll {
+  border-radius: var(--nyx-radius-card);
+  background: @theme_card;
+}
+
+textview.service-log {
+  padding: 10px 12px;
+  font-size: 12px;
+  background: transparent;
+}
+
+.settings-head {
+  margin-bottom: 14px;
 }

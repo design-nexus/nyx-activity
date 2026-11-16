@@ -98,25 +98,6 @@ pub fn signal_quality(dbm: f64) -> f64 {
     ((dbm + 100.0) * 2.0).clamp(0.0, 100.0)
 }
 
-/// Counts per second: 950/s, 12.4k/s, 3.1M/s.
-pub fn per_sec(v: f64) -> String {
-    format!("{}/s", count(v))
-}
-
-/// 950, 12.4k, 3.1M.
-pub fn count(v: f64) -> String {
-    let v = v.max(0.0);
-    if v >= 1e6 {
-        format!("{:.1}M", v / 1e6)
-    } else if v >= 1e4 {
-        format!("{:.0}k", v / 1e3)
-    } else if v >= 1e3 {
-        format!("{:.1}k", v / 1e3)
-    } else {
-        format!("{}", v.round() as u64)
-    }
-}
-
 pub fn ms(v: f64) -> String {
     if v >= 100.0 {
         format!("{v:.0} ms")
@@ -163,15 +144,6 @@ mod tests {
         assert_eq!(temp_in(42.4, false), "42 °C");
         assert_eq!(temp_in(100.0, true), "212 °F");
         assert_eq!(temp_in(-40.0, true), "-40 °F");
-    }
-
-    #[test]
-    fn formats_counts() {
-        assert_eq!(count(950.4), "950");
-        assert_eq!(count(1234.0), "1.2k");
-        assert_eq!(count(16093.0), "16k");
-        assert_eq!(count(3_100_000.0), "3.1M");
-        assert_eq!(signal_quality(-71.0), 58.0);
     }
 
     #[test]

@@ -9,10 +9,6 @@ use std::process::{Command, Stdio};
 pub struct Counters {
     pub rx: u64,
     pub tx: u64,
-    pub rx_packets: u64,
-    pub tx_packets: u64,
-    pub errors: u64,
-    pub drops: u64,
 }
 
 pub fn parse_net_dev(text: &str) -> HashMap<String, Counters> {
@@ -25,10 +21,7 @@ pub fn parse_net_dev(text: &str) -> HashMap<String, Counters> {
                 return None;
             }
             let n = |i: usize| f.get(i).copied().unwrap_or(0);
-            Some((
-                name.trim().to_string(),
-                Counters { rx: n(0), tx: n(8), rx_packets: n(1), tx_packets: n(9), errors: n(2) + n(10), drops: n(3) + n(11) },
-            ))
+            Some((name.trim().to_string(), Counters { rx: n(0), tx: n(8) }))
         })
         .collect()
 }
@@ -49,23 +42,15 @@ pub struct Iface {
     pub rx_bps: f64,
     pub tx_bps: f64,
     pub rx_total: u64,
-    pub tx_total: u64,
     pub addrs: Vec<String>,
-    pub mac: String,
     pub ssid: Option<String>,
     /// Signal level in dBm.
     pub signal: Option<f64>,
     pub speed_mbps: Option<u64>,
-    pub rx_pps: f64,
-    pub tx_pps: f64,
-    /// Since the interface came up.
-    pub errors: u64,
-    pub drops: u64,
     pub wifi: Option<WifiLink>,
     /// The default route's gateway, when it goes through here.
     pub gateway: Option<String>,
     pub dns: Vec<String>,
-    pub mtu: u64,
 }
 
 /// What `iw dev X link` says about the connection.
@@ -265,16 +250,11 @@ impl NetSampler {
                 kind: k,
                 up: read(&format!("{base}/operstate")).trim() == "up",
                 rx_total: now.rx,
-                tx_total: now.tx,
                 addrs: self.addrs.get(name).cloned().unwrap_or_default(),
-                mac: read(&format!("{base}/address")).trim().to_string(),
                 signal: signals.get(name).copied(),
                 speed_mbps: read(&format!("{base}/speed")).trim().parse::<i64>().ok().filter(|s| *s > 0).map(|s| s as u64),
-                errors: now.errors,
-                drops: now.drops,
                 gateway: self.gateways.iter().find(|(dev, _)| dev == name).map(|(_, g)| g.clone()),
                 dns: self.dns.get(name.as_str()).or_else(|| self.dns.get("")).cloned().unwrap_or_default(),
-                mtu: read(&format!("{base}/mtu")).trim().parse().unwrap_or(0),
                 ..Default::default()
             };
             if let Some(prev) = self.prev.get(name)
@@ -283,8 +263,6 @@ impl NetSampler {
                 let rate = |a: u64, b: u64| a.saturating_sub(b) as f64 / elapsed;
                 i.rx_bps = rate(now.rx, prev.rx);
                 i.tx_bps = rate(now.tx, prev.tx);
-                i.rx_pps = rate(now.rx_packets, prev.rx_packets);
-                i.tx_pps = rate(now.tx_packets, prev.tx_packets);
             }
             if k == Kind::Wifi && i.up {
                 if wifi_tick || !self.links.contains_key(name) {
@@ -319,7 +297,7 @@ mod tests {
         let text = "Inter-|   Receive\n face |bytes packets\n\
                     wlo1: 1000 10 0 0 0 0 0 0 2000 20 0 0 0 0 0 0\n    lo: 5 1 0 0 0 0 0 0 5 1 0 0 0 0 0 0\n";
         let s = parse_net_dev(text);
-        assert_eq!(s["wlo1"], Counters { rx: 1000, tx: 2000, rx_packets: 10, tx_packets: 20, errors: 0, drops: 0 });
+        assert_eq!(s["wlo1"], Counters { rx: 1000, tx: 2000 });
         assert_eq!(s.len(), 2);
     }
 

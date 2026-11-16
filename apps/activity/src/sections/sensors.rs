@@ -1,14 +1,106 @@
-use crate::charts::{self, Bar, PAIR};
-use crate::graph::{self, Scale, Series, Tone};
+use crate::charts::{self};
 use crate::sampler::Snapshot;
 use crate::sampler::sensors::Reading;
 use crate::widgets::{self, Page};
-use crate::{fmt, live, prefs};
+use crate::{fmt, live, parts, prefs};
 use gtk::prelude::*;
 
-/// The limit a reading is measured against: its own, or a sensible default.
+/// What a temperature is in, which says how hot is too hot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Part {
+    Processor,
+    Storage,
+    Board,
+}
+
+impl Part {
+    fn title(self) -> &'static str {
+        match self {
+            Part::Processor => "Processor",
+            Part::Storage => "Storage",
+            Part::Board => "Board and Wi-Fi",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Part::Processor => "activity-cpu-symbolic",
+            Part::Storage => "drive-harddisk-symbolic",
+            Part::Board => "network-wireless-symbolic",
+        }
+    }
+
+    /// The limit when the chip doesn't give one.
+    fn default_limit(self) -> f64 {
+        match self {
+            Part::Processor => 100.0,
+            Part::Storage => 80.0,
+            Part::Board => 95.0,
+        }
+    }
+}
+
+fn part_of(t: &Reading) -> Part {
+    if t.chip == "CPU" {
+        Part::Processor
+    } else if t.chip.starts_with("NVMe") {
+        Part::Storage
+    } else {
+        Part::Board
+    }
+}
+
 fn limit(t: &Reading) -> f64 {
-    t.high.unwrap_or(100.0)
+    t.high.unwrap_or_else(|| part_of(t).default_limit())
+}
+
+/// The temperatures worth a row, with a name for people: the processor's package and its
+/// hottest core, each drive's own reading, and one per other chip.
+fn rows(s: &Snapshot) -> Vec<(Part, String, f64, f64)> {
+    let mut out = Vec::new();
+    let cpu: Vec<&Reading> = s.sensors.temps.iter().filter(|t| t.chip == "CPU").collect();
+    if let Some(p) = cpu.iter().find(|t| t.label.starts_with("Package") || t.label == "Tctl").or(cpu.first()) {
+        out.push((Part::Processor, "Package".to_string(), p.value, limit(p)));
+    }
+    if let Some(c) = cpu.iter().filter(|t| t.label.starts_with("Core")).max_by(|a, b| a.value.total_cmp(&b.value)) {
+        out.push((Part::Processor, "Hottest core".to_string(), c.value, limit(c)));
+    }
+    let mut chips: Vec<&str> = Vec::new();
+    for t in s.sensors.temps.iter().filter(|t| t.chip != "CPU") {
+        if !chips.contains(&t.chip.as_str()) {
+            chips.push(&t.chip);
+        }
+    }
+    for chip in chips {
+        let ts: Vec<&Reading> = s.sensors.temps.iter().filter(|t| t.chip == chip).collect();
+        // A drive's "Composite" is the one it reports as its own.
+        let Some(t) = ts.iter().find(|t| t.label == "Composite").or(ts.iter().max_by(|a, b| a.value.total_cmp(&b.value))) else {
+            continue;
+        };
+        let name = if let Some(n) = chip.strip_prefix("NVMe ") {
+            let disk = s.disks.iter().position(|d| d.name.starts_with(&format!("nvme{n}")));
+            disk.map_or_else(|| format!("Drive {n}"), |i| format!("Disk {i} (NVMe)"))
+        } else {
+            match chip {
+                "Wi-Fi" => "Wi-Fi card".to_string(),
+                c => c.to_string(),
+            }
+        };
+        out.push((part_of(t), name, t.value, limit(t)));
+    }
+    out
+}
+
+/// "CPU fan", "GPU fan", "System fan".
+fn fan_name(f: &Reading) -> String {
+    match f.label.as_str() {
+        "cpu_fan" => "CPU fan".into(),
+        "gpu_fan" => "GPU fan".into(),
+        "mid_fan" => "Middle fan".into(),
+        l if l.starts_with("fan") && f.chip == "ACPI" => "System fan".into(),
+        l if l.starts_with("fan") => format!("{} fan {}", f.chip, &l[3..]),
+        l => l.replace('_', " "),
+    }
 }
 
 pub fn build(page: &Page) {
@@ -16,276 +108,254 @@ pub fn build(page: &Page) {
     page.body.append(&holder);
     let page = Page { root: page.root.clone(), body: holder.clone() };
     live::ready(move |snap| {
-        temperatures(&page, snap);
+        let g = page.cards("");
+        let hot = parts::note();
+        g.add(&hot.root);
+        let root = hot.root.clone();
+        live::on_tick(&root, move |s| hot_note(&hot, s));
+        if snap.sensors.temps.is_empty() {
+            g.add(&widgets::row("No temperature sensors", "The kernel exposes no hwmon temperature inputs here.", None));
+        } else {
+            g.add(&temperatures(snap));
+        }
+        let mut cards: Vec<gtk::Widget> = Vec::new();
         if !snap.sensors.fans.is_empty() {
-            fans(&page, snap);
+            cards.push(fans().upcast());
         }
-        for b in &snap.sensors.batteries {
-            battery(&page, &b.name);
-        }
-        power(&page, snap);
+        cards.push(power(snap).upcast());
+        let refs: Vec<&gtk::Widget> = cards.iter().collect();
+        g.add(&parts::columns(&refs, 2));
     });
 }
 
-/// Each chip's hottest reading.
-fn hottest_by_chip(s: &Snapshot) -> Vec<&Reading> {
-    let mut out: Vec<&Reading> = Vec::new();
-    for t in &s.sensors.temps {
-        match out.iter_mut().find(|x| x.chip == t.chip) {
-            Some(x) if t.value > x.value => *x = t,
-            Some(_) => {}
-            None => out.push(t),
-        }
+/// A plain note when something is close to its limit.
+fn hot_note(note: &parts::Note, s: &Snapshot) {
+    let warn = prefs::get().warn_temp;
+    let worst = rows(s).into_iter().map(|(p, n, v, l)| (p, n, v, l, v / l)).max_by(|a, b| a.4.total_cmp(&b.4));
+    let Some((part, name, v, lim, f)) = worst else { return note.hide() };
+    let over = if part == Part::Processor { v >= warn || f >= 0.9 } else { f >= 0.9 };
+    if !over {
+        return note.hide();
     }
-    out
+    let (title, mut detail) = match part {
+        Part::Processor => {
+            // How long it's been this hot, from the graph's history.
+            let hist = live::history("temp.cpu");
+            let n = hist.iter().rev().take_while(|t| **t >= v.min(warn) - 2.0).count();
+            let secs = n as f64 * prefs::get().interval_ms as f64 / 1000.0;
+            let mut d = format!("{} for {}", fmt::temp(v), fmt::duration(secs));
+            if let Some(g) = s.groups.iter().filter(|g| g.cpu >= 25.0).max_by(|a, b| a.cpu.total_cmp(&b.cpu)) {
+                d.push_str(&format!(" while {} is busy", super::top::group_identity(g, s).0));
+            }
+            ("The processor is running hot".to_string(), d)
+        }
+        _ => (format!("{name} is running hot"), fmt::temp(v)),
+    };
+    detail.push_str(&format!(". It slows itself down at {}.", fmt::temp(lim)));
+    note.set("activity-thermometer-symbolic", if f >= 0.97 { parts::Tone::Bad } else { parts::Tone::Warn }, &title, &detail);
 }
 
-fn temperatures(page: &Page, snap: &Snapshot) {
-    let g = page.cards("Temperatures");
-    if snap.sensors.temps.is_empty() {
-        g.add(&widgets::row("No temperature sensors", "The kernel exposes no hwmon temperature inputs here.", None));
-        return;
-    }
+/// A temperature's row: its name, value and limit labels, and its bar with the fill and level it draws.
+type Slot = (String, gtk::Label, gtk::Label, gtk::DrawingArea, std::rc::Rc<std::cell::Cell<(f64, u8)>>);
 
-    // Compact temperatures leave the history charts as the main visualization.
-    let chips: Vec<String> = hottest_by_chip(snap).iter().map(|t| t.chip.clone()).take(6).collect();
-    let mut readings = Vec::new();
+/// A card per part, each temperature a bar against its limit.
+fn temperatures(snap: &Snapshot) -> gtk::Box {
     let mut cards: Vec<gtk::Widget> = Vec::new();
-    for chip in &chips {
-        let reading = charts::tile(chip);
-        cards.push(reading.root.clone().upcast());
-        readings.push((chip.clone(), reading));
-    }
-    let refs: Vec<&gtk::Widget> = cards.iter().collect();
-    g.add(&charts::row(&refs, 150));
-
-    // ----- History: the CPU, and the two hottest other sensors -----
-    let cpu_graph = graph::graph(vec![Series::new("temp.cpu", "CPU", Tone::Accent)], Scale::Auto { floor: 60.0 }, fmt::temp, 120);
-    let (cpu_card, cpu_sum) = charts::card("Processor", &cpu_graph.root);
-    let mut others: Vec<&Reading> = hottest_by_chip(snap).into_iter().filter(|t| t.chip != "CPU").collect();
-    others.sort_by(|a, b| b.value.total_cmp(&a.value));
-    let series: Vec<Series> = others
-        .iter()
-        .take(2)
-        .enumerate()
-        .map(|(i, t)| {
-            Series::new(format!("temp.{}.{}", t.chip, t.label), &t.chip, if i == 0 { Tone::Accent } else { Tone::Second })
-        })
-        .collect();
-    if series.is_empty() {
-        g.add(&cpu_card);
-    } else {
-        let gr = graph::graph(series, Scale::Auto { floor: 60.0 }, fmt::temp, 120);
-        let (other_card, _) = charts::card("Hottest elsewhere", &gr.root);
-        g.add(&charts::row(&[cpu_card.upcast_ref(), other_card.upcast_ref()], PAIR));
-    }
-
-    // ----- Every sensor, in two columns -----
-    let n = snap.sensors.temps.len();
-    let half = n.div_ceil(2);
-    let left = charts::bar_list(half, "", false);
-    let right = charts::bar_list(half, "", false);
-    let (lc, all_sum) = charts::card("All sensors", &left.root);
-    let (rc, _) = charts::card("", &right.root);
-    g.add(&widgets::disclosure(
-        "sensors.temperatures",
-        "All temperature sensors",
-        &charts::row(&[lc.upcast_ref(), rc.upcast_ref()], PAIR),
-    ));
-
-    live::on_tick(&g.list, move |s| {
-        let warn_at = prefs::get().warn_temp;
-        for (chip, reading) in &readings {
-            let Some(t) = s.sensors.temps.iter().filter(|t| &t.chip == chip).max_by(|a, b| a.value.total_cmp(&b.value)) else {
-                continue;
-            };
-            reading.value.set_text(&fmt::temp(t.value));
-            widgets::set_warn(&reading.value, t.value >= warn_at);
-            reading.sub.set_text(&match t.high {
-                Some(h) => format!("{} · limit {}", t.label, fmt::temp(h)),
-                None => t.label.clone(),
-            });
-            reading.root.set_tooltip_text(Some(&format!("{chip}: hottest reading is {} ({})", fmt::temp(t.value), t.label)));
+    let mut slots: Vec<Slot> = Vec::new();
+    for part in [Part::Processor, Part::Storage, Part::Board] {
+        let names: Vec<String> = rows(snap).into_iter().filter(|r| r.0 == part).map(|r| r.1).collect();
+        if names.is_empty() {
+            continue;
         }
-        cpu_sum.set_text(&s.sensors.cpu_temp.map(fmt::temp).unwrap_or_default());
-        widgets::set_warn(&cpu_sum, s.sensors.cpu_temp.is_some_and(|t| t >= warn_at));
-        let bars: Vec<Bar> = s
-            .sensors
-            .temps
-            .iter()
-            .map(|t| Bar {
-                name: format!("{} · {}", t.chip, t.label),
-                frac: (t.value / limit(t)).clamp(0.0, 1.0),
-                value: fmt::temp(t.value),
-                tip: format!(
-                    "{} · {}: {}{}",
-                    t.chip,
-                    t.label,
-                    fmt::temp(t.value),
-                    t.high.map(|h| format!(" (limit {})", fmt::temp(h))).unwrap_or_default()
-                ),
-                warn: t.value >= warn_at,
-                ..Default::default()
-            })
-            .collect();
-        let (a, b) = bars.split_at(bars.len().div_ceil(2));
-        left.set(a);
-        right.set(b);
-        all_sum.set_text(&format!("{} readings", bars.len()));
-    });
-}
-
-fn fans(page: &Page, snap: &Snapshot) {
-    let g = page.cards("Fans");
-    let series: Vec<Series> = snap
-        .sensors
-        .fans
-        .iter()
-        .take(2)
-        .enumerate()
-        .map(|(i, f)| {
-            Series::new(format!("fan.{}.{}", f.chip, f.label), &f.label, if i == 0 { Tone::Accent } else { Tone::Second })
-        })
-        .collect();
-    let gr = graph::graph(series, Scale::Auto { floor: 3000.0 }, |v| format!("{} rpm", v.round()), 110);
-    let (graph_card, graph_sum) = charts::card("Speed", &gr.root);
-    let list = charts::bar_list(snap.sensors.fans.len().max(1), "", false);
-    let (list_card, _) = charts::card("Each fan", &list.root);
-    g.add(&graph_card);
-    g.add(&widgets::disclosure("sensors.fans", "Individual fans", &list_card));
-    live::on_tick(&graph_card, move |s| {
-        let max = s.sensors.fans.iter().map(|f| f.value).fold(6000.0, f64::max);
-        let bars: Vec<Bar> = s
-            .sensors
-            .fans
-            .iter()
-            .map(|f| Bar {
-                name: format!("{} · {}", f.chip, f.label),
-                frac: f.value / max,
-                value: format!("{} rpm", f.value.round()),
-                ..Default::default()
-            })
-            .collect();
-        list.set(&bars);
-        let spinning = s.sensors.fans.iter().filter(|f| f.value > 0.0).count();
-        graph_sum.set_text(&format!("{spinning} of {} spinning", s.sensors.fans.len()));
-    });
-}
-
-fn battery(page: &Page, name: &str) {
-    let g = page.cards(&format!("Battery · {name}"));
-    let name = name.to_string();
-
-    let (charge, charge_sum, ring, lv) = charts::ring_card(
-        "Charge",
-        120,
-        &[("State", None), ("Time left", None), ("Power", None), ("Charger", None), ("Stops charging at", None)],
-    );
-    let gr = graph::graph(vec![Series::new(format!("bat.{name}"), "Charge", Tone::Accent)], Scale::Percent, fmt::pct, 130);
-    let (hist, _) = charts::card("Charge over time", &gr.root);
-    g.add(&charts::primary(&charge, &hist));
-
-    let gr = graph::graph(
-        vec![Series::new(format!("bat.{name}.watts"), "Power", Tone::Accent)],
-        Scale::Auto { floor: 10.0 },
-        fmt::watts,
-        120,
-    );
-    let (draw, draw_sum) = charts::card("Power draw", &gr.root);
-    let health_body = widgets::vbox(12);
-    let health_value = widgets::label("–", "stat-value");
-    health_body.append(&health_value);
-    let (legend, hv) =
-        charts::legend(&[("Holds now", None), ("When new", None), ("Cycles", None), ("Voltage", None), ("Model", None)]);
-    health_body.append(&legend);
-    let (health, health_sum) = charts::card("Health", &health_body);
-    let diagnostics = charts::row(&[draw.upcast_ref(), health.upcast_ref()], PAIR);
-    g.add(&widgets::disclosure(&format!("sensors.battery.{name}"), "Battery health and power history", &diagnostics));
-
-    live::on_tick(&charge, move |s| {
-        let Some(b) = s.sensors.batteries.iter().find(|x| x.name == name) else { return };
-        let low = b.percent <= 15.0 && b.status == "Discharging";
-        ring.set(b.percent / 100.0, &fmt::pct(b.percent), &b.status.to_lowercase(), low);
-        charge_sum.set_text(&format!("{:.1} of {:.1} Wh", b.energy_now, b.energy_full));
-        lv[0].set_text(&b.status);
-        lv[1].set_text(&b.hours_left.map(fmt::hours).unwrap_or_else(|| "–".into()));
-        lv[2].set_text(&fmt::watts(b.watts));
-        lv[3].set_text(match s.sensors.ac {
-            Some(true) => "Plugged in",
-            Some(false) => "Unplugged",
-            None => "–",
-        });
-        lv[4].set_text(&b.limit.map(fmt::pct).unwrap_or_else(|| "100%".into()));
-        draw_sum.set_text(&match b.status.as_str() {
-            "Discharging" => format!("using {}", fmt::watts(b.watts)),
-            "Charging" => format!("charging at {}", fmt::watts(b.watts)),
-            _ => "not charging".into(),
-        });
-        match b.health() {
-            Some(h) => {
-                health_value.set_text(&format!("{} of original capacity", fmt::pct(h)));
-                widgets::set_warn(&health_value, h < 70.0);
-                health_sum.set_text(if h >= 80.0 {
-                    "Good"
-                } else if h >= 60.0 {
-                    "Worn"
-                } else {
-                    "Replace soon"
+        let c = parts::card(part.icon(), part.title());
+        for name in names {
+            let row = widgets::vbox(6);
+            row.add_css_class("temp-row");
+            let top = widgets::hbox(6);
+            let n = widgets::label(&name, "temp-name");
+            n.set_hexpand(true);
+            n.set_xalign(0.0);
+            n.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            let v = widgets::label("", "temp-value");
+            v.add_css_class("tnum");
+            let l = widgets::label("", "temp-limit");
+            l.add_css_class("tnum");
+            top.append(&n);
+            top.append(&v);
+            top.append(&l);
+            row.append(&top);
+            let state = std::rc::Rc::new(std::cell::Cell::new((0.0f64, 0u8)));
+            let bar = gtk::DrawingArea::new();
+            bar.set_content_height(6);
+            bar.set_hexpand(true);
+            {
+                let state = state.clone();
+                bar.set_draw_func(move |_, cr, w, h| {
+                    let (w, h) = (w as f64, h as f64);
+                    let p = crate::theme::palette();
+                    let t = crate::theme::Rgb::hex(&p.text);
+                    round(cr, w, h, w);
+                    cr.set_source_rgba(t.0, t.1, t.2, 0.08);
+                    let _ = cr.fill();
+                    let (f, level) = state.get();
+                    let fw = (f.clamp(0.0, 1.0) * w).max(h);
+                    round(cr, w, h, fw);
+                    let c = match level {
+                        2 => crate::theme::Rgb::hex(&p.danger),
+                        1 => charts::swatch("amber"),
+                        _ => charts::swatch("blue"),
+                    };
+                    cr.set_source_rgb(c.0, c.1, c.2);
+                    let _ = cr.fill();
                 });
             }
-            None => {
-                health_value.set_text("–");
-                health_sum.set_text("Not available");
+            row.append(&bar);
+            c.root.append(&row);
+            slots.push((name, v, l, bar, state));
+        }
+        cards.push(c.root.upcast());
+    }
+    let refs: Vec<&gtk::Widget> = cards.iter().collect();
+    let row = charts::flow_row(&refs, 230, 3, true);
+    live::on_tick(&row, move |s| {
+        let now = rows(s);
+        for (name, v, l, bar, state) in &slots {
+            let Some((_, _, t, lim)) = now.iter().find(|r| &r.1 == name) else { continue };
+            let f = t / lim;
+            let level = if f >= 0.97 {
+                2
+            } else if f >= 0.85 {
+                1
+            } else {
+                0
+            };
+            v.set_text(&fmt::temp(*t));
+            l.set_text(&format!("of {}", fmt::temp(*lim).trim_end_matches(" °C").trim_end_matches(" °F")));
+            for (class, on) in [("warn", level == 1), ("bad", level == 2)] {
+                if on {
+                    v.add_css_class(class);
+                } else {
+                    v.remove_css_class(class);
+                }
+            }
+            if state.get() != (f, level) {
+                state.set((f, level));
+                bar.queue_draw();
             }
         }
-        hv[0].set_text(&format!("{:.1} Wh", b.energy_full));
-        hv[1].set_text(&if b.energy_design > 0.0 { format!("{:.1} Wh", b.energy_design) } else { "–".into() });
-        hv[2].set_text(&b.cycles.map(|c| c.to_string()).unwrap_or_else(|| "–".into()));
-        hv[3].set_text(&format!("{:.2} V", b.volts));
-        let model =
-            [b.model.as_str(), b.technology.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" · ");
-        hv[4].set_text(if model.is_empty() { "–" } else { &model });
     });
+    row
 }
 
-fn power(page: &Page, snap: &Snapshot) {
-    let g = page.cards("Power");
-    let charger = charts::tile("Charger");
-    let profile = charts::tile("Power profile");
-    let mut tiles: Vec<gtk::Widget> = vec![charger.root.clone().upcast(), profile.root.clone().upcast()];
-    let ports: Vec<(String, charts::Tile)> = snap
-        .sensors
-        .sources
-        .iter()
-        .map(|p| {
-            let t = charts::tile(&p.name);
-            tiles.push(t.root.clone().upcast());
-            (p.name.clone(), t)
-        })
-        .collect();
-    let refs: Vec<&gtk::Widget> = tiles.iter().collect();
-    g.add(&charts::row(&refs, 150));
-    live::on_tick(&charger.root, move |s| {
-        charger.value.set_text(match s.sensors.ac {
-            Some(true) => "Plugged in",
-            Some(false) => "On battery",
-            None => "–",
-        });
-        let draw = s.sensors.batteries.iter().map(|b| b.watts).sum::<f64>();
-        charger.sub.set_text(&if draw > 0.1 { format!("battery {}", fmt::watts(draw)) } else { "battery idle".into() });
-        let c = &s.cpu;
-        profile.value.set_text(&if c.platform_profile.is_empty() { "–".to_string() } else { capitalise(&c.platform_profile) });
-        profile.sub.set_text(&if c.epp.is_empty() { c.governor.clone() } else { format!("CPU prefers {}", c.epp) });
-        for (name, t) in &ports {
-            let Some(p) = s.sensors.sources.iter().find(|p| &p.name == name) else { continue };
-            t.value.set_text(if p.online { "Charging" } else { "Not in use" });
-            t.sub.set_text(&match (p.online, p.mode.as_str()) {
-                (true, m) if p.watts > 0.1 => format!("{} · {m}", fmt::watts(p.watts)),
-                (true, m) => m.to_string(),
-                _ => "USB Power Delivery".into(),
+fn round(cr: &gtk::cairo::Context, _w: f64, h: f64, upto: f64) {
+    use std::f64::consts::{FRAC_PI_2, PI};
+    let r = h / 2.0;
+    cr.new_sub_path();
+    cr.arc(upto - r, r, r, -FRAC_PI_2, FRAC_PI_2);
+    cr.arc(r, r, r, FRAC_PI_2, PI + FRAC_PI_2);
+    cr.close_path();
+}
+
+fn fans() -> gtk::Box {
+    let c = parts::card("activity-fan-symbolic", "Fans");
+    let list = widgets::vbox(0);
+    list.add_css_class("kv-list");
+    c.root.append(&list);
+    let shown = std::cell::RefCell::new(Vec::<String>::new());
+    let labels = std::cell::RefCell::new(Vec::<gtk::Label>::new());
+    live::on_tick(&c.root, move |s| {
+        let names: Vec<String> = s.sensors.fans.iter().map(fan_name).collect();
+        if *shown.borrow() != names {
+            while let Some(ch) = list.first_child() {
+                list.remove(&ch);
+            }
+            let mut out = Vec::new();
+            for n in &names {
+                let row = widgets::hbox(12);
+                row.add_css_class("kv-row");
+                let k = widgets::label(n, "kv-key");
+                k.set_hexpand(true);
+                k.set_xalign(0.0);
+                let v = widgets::label("", "kv-value");
+                v.add_css_class("tnum");
+                row.append(&k);
+                row.append(&v);
+                list.append(&row);
+                out.push(v);
+            }
+            *labels.borrow_mut() = out;
+            *shown.borrow_mut() = names;
+        }
+        for (l, f) in labels.borrow().iter().zip(&s.sensors.fans) {
+            l.set_text(&if f.value > 0.0 {
+                format!("{} rpm", super::dashboard::thousands(f.value.round() as u64))
+            } else {
+                "Stopped".into()
             });
         }
+        let spinning = s.sensors.fans.iter().filter(|f| f.value > 0.0).count();
+        c.meta.set_text(&format!("{spinning} of {} spinning", s.sensors.fans.len()));
     });
+    c.root
+}
+
+/// The battery, what the machine draws, and how worn the battery is.
+fn power(snap: &Snapshot) -> gtk::Box {
+    let c = parts::card("battery-symbolic", if snap.sensors.batteries.is_empty() { "Power" } else { "Battery and power" });
+    let bat = charts::tile("Battery");
+    let draw = charts::tile("Drawing");
+    let health = charts::tile("Health");
+    let profile = charts::tile("Power profile");
+    c.root.append(&parts::readings(&[&bat, &draw, &health, &profile]));
+    live::on_tick(&c.root, move |s| {
+        let b = s.sensors.batteries.first();
+        bat.root.set_visible(b.is_some());
+        health.root.set_visible(b.is_some_and(|b| b.health().is_some()));
+        if let Some(b) = b {
+            bat.value.set_text(&fmt::pct(b.percent));
+            let plug = match s.sensors.ac {
+                Some(true) => " · plugged in",
+                Some(false) => "",
+                None => "",
+            };
+            let state = match b.status.as_str() {
+                "Full" => "full".to_string(),
+                "Charging" => b.hours_left.map_or("charging".into(), |h| format!("full in {}", fmt::hours(h))),
+                "Discharging" => b.hours_left.map_or("on battery".into(), |h| format!("{} left", fmt::hours(h))),
+                other => other.to_lowercase(),
+            };
+            bat.sub.set_text(&format!("{state}{plug}"));
+            widgets::set_warn(&bat.value, b.percent <= 15.0 && b.status == "Discharging");
+            if let Some(h) = b.health() {
+                health.value.set_text(&fmt::pct(h));
+                health.sub.set_text("of its original capacity");
+                widgets::set_warn(&health.value, h < 70.0);
+            }
+        }
+        let watts = s.sensors.batteries.iter().map(|b| b.watts).sum::<f64>();
+        let on_battery = s.sensors.ac == Some(false);
+        draw.value.set_text(&if watts > 0.1 { fmt::watts(watts) } else { "–".into() });
+        let charger = s.sensors.sources.iter().find(|p| p.online).map(|p| {
+            let w = if p.watts > 0.1 { format!(" at {}", fmt::watts(p.watts)) } else { String::new() };
+            format!("{}{w}{}", p.name, if p.mode.is_empty() { String::new() } else { format!(" · {}", p.mode) })
+        });
+        draw.sub.set_text(&match (on_battery, b.map(|b| b.status.as_str())) {
+            (true, _) => "from the battery".to_string(),
+            (false, Some("Charging")) => "into the battery".to_string(),
+            (false, _) if watts > 0.1 => "from the charger".to_string(),
+            _ => String::new(),
+        });
+        draw.root.set_tooltip_text(charger.map(|c| format!("Charging from {c}")).as_deref());
+        let cpu = &s.cpu;
+        profile.root.set_visible(!cpu.platform_profile.is_empty());
+        profile.value.set_text(&capitalise(&cpu.platform_profile));
+        profile.sub.set_text(&if cpu.epp.is_empty() {
+            String::new()
+        } else {
+            format!("CPU prefers {}", cpu.epp.replace('_', " "))
+        });
+    });
+    c.root
 }
 
 fn capitalise(s: &str) -> String {

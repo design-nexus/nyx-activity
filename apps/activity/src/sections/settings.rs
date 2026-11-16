@@ -1,13 +1,31 @@
 use crate::widgets::{self, Page};
-use crate::{live, prefs, window};
+use crate::{fmt, live, parts, prefs, window};
+use gtk::prelude::*;
+
+/// A dropdown row of `(value, label)` choices, with the current value added when it isn't one.
+fn choice_row(title: &str, desc: &str, mut options: Vec<(f64, String)>, current: f64, set: impl Fn(f64) + 'static) -> gtk::Box {
+    if !options.iter().any(|(v, _)| (v - current).abs() < 0.5) {
+        let label = options.first().map_or_else(|| current.to_string(), |_| format!("{current}"));
+        options.push((current, label));
+        options.sort_by(|a, b| a.0.total_cmp(&b.0));
+    }
+    let opts: Vec<(String, String)> = options.iter().map(|(v, l)| (v.to_string(), l.clone())).collect();
+    let now = options.iter().find(|(v, _)| (v - current).abs() < 0.5).map_or(String::new(), |(v, _)| v.to_string());
+    let (row, _) = widgets::choice_row(title, desc, opts, &now, move |v| set(v.parse().unwrap_or(0.0)));
+    row
+}
 
 pub fn build(page: &Page) {
     let p = prefs::get();
+    let head = parts::head("Settings", "How often Activity reads the machine, and when it warns you");
+    head.root.add_css_class("settings-head");
+    page.body.append(&head.root);
+
     // ----- Monitoring -----
     let g = page.group("Monitoring");
     let (r, _) = widgets::choice_row(
         "Update every",
-        "How often numbers and graphs refresh. Faster costs a little more CPU.",
+        "Faster costs a little more CPU",
         widgets::opts(&[("500", "0.5 seconds"), ("1000", "1 second"), ("2000", "2 seconds"), ("5000", "5 seconds")]),
         &p.interval_ms.to_string(),
         |v| {
@@ -19,36 +37,19 @@ pub fn build(page: &Page) {
     );
     g.add(&r);
     let (r, _) = widgets::choice_row(
-        "Graph history",
-        "How far back the graphs reach.",
-        widgets::opts(&[("60", "1 minute"), ("300", "5 minutes"), ("600", "10 minutes")]),
+        "Graphs show",
+        "",
+        widgets::opts(&[("60", "The last minute"), ("300", "The last 5 minutes"), ("600", "The last 10 minutes")]),
         &p.history_secs.to_string(),
         |v| {
             prefs::update(|p| p.history_secs = v.parse().unwrap_or(60));
-            live::trim();
-        },
-    );
-    g.add(&r);
-    let (r, _) =
-        widgets::switch_row("Network speeds in bits", "Show Mb/s like internet plans do, instead of MiB/s.", p.net_bits, |on| {
-            prefs::update(|p| p.net_bits = on)
-        });
-    g.add(&r);
-    let (r, _) = widgets::choice_row(
-        "Temperature unit",
-        "How temperatures are shown everywhere, graphs included.",
-        widgets::opts(&[("c", "Celsius (°C)"), ("f", "Fahrenheit (°F)")]),
-        if p.fahrenheit { "f" } else { "c" },
-        |v| {
-            prefs::update(|p| p.fahrenheit = v == "f");
-            // Refresh the readouts now rather than at the next sample.
             live::poke();
         },
     );
     g.add(&r);
     let (r, _) = widgets::switch_row(
         "Rest while hidden",
-        "Stop reading every process and the GPU while this window is out of sight. The graphs keep going.",
+        "Stops reading the GPU and every process while the window is closed",
         p.pause_hidden,
         |on| {
             prefs::update(|p| p.pause_hidden = on);
@@ -58,95 +59,121 @@ pub fn build(page: &Page) {
         },
     );
     g.add(&r);
+    g.add(&widgets::segmented_row(
+        "Temperatures in",
+        "",
+        widgets::opts(&[("c", "°C"), ("f", "°F")]),
+        if p.fahrenheit { "f" } else { "c" },
+        |v| {
+            prefs::update(|p| p.fahrenheit = v == "f");
+            live::poke();
+        },
+    ));
+    g.add(&widgets::segmented_row(
+        "Network speeds in",
+        "",
+        widgets::opts(&[("bytes", "Bytes"), ("bits", "Bits")]),
+        if p.net_bits { "bits" } else { "bytes" },
+        |v| {
+            prefs::update(|p| p.net_bits = v == "bits");
+            live::poke();
+        },
+    ));
 
-    let (r, _) = widgets::button_row(
-        "Export graph history",
-        "Save every graph's history as a CSV file. Right-click a graph to save just that one.",
-        "Export…",
-        |_| crate::actions::export_csv("activity-history", None),
-    );
-    g.add(&r);
-
-    // ----- Warnings -----
-    let g = page.group("Warnings");
-    g.note("Past these, the Dashboard says so first thing, values turn red, and alerts (below) can notify you.");
+    // ----- Warn me when -----
+    let g = page.group("Warn me when");
     // Stored in °C; shown in the chosen unit.
-    let f = p.fahrenheit;
-    let to_unit = move |c: f64| if f { c * 9.0 / 5.0 + 32.0 } else { c };
-    let (r, _) = widgets::spin_row(
-        &format!("CPU temperature ({})", if f { "°F" } else { "°C" }),
-        "How hot the CPU may get. The unit follows the setting above, from the next time this page opens.",
-        if f { (120.0, 230.0, 1.0) } else { (50.0, 110.0, 1.0) },
-        to_unit(p.warn_temp).round(),
-        move |v| prefs::update(|p| p.warn_temp = if f { (v - 32.0) * 5.0 / 9.0 } else { v }),
-    );
-    g.add(&r);
-    let (r, _) = widgets::spin_row("Memory in use (%)", "How full RAM may get.", (50.0, 100.0, 1.0), p.warn_mem, |v| {
+    let temps: Vec<(f64, String)> = [70.0, 75.0, 80.0, 85.0, 90.0, 95.0, 100.0].iter().map(|c| (*c, fmt::temp(*c))).collect();
+    g.add(&choice_row("The processor is hotter than", "", temps, p.warn_temp.round(), |v| prefs::update(|p| p.warn_temp = v)));
+    let pcts = |vals: &[f64]| vals.iter().map(|v| (*v, fmt::pct(*v))).collect::<Vec<_>>();
+    g.add(&choice_row("Memory is fuller than", "", pcts(&[70.0, 75.0, 80.0, 85.0, 90.0, 95.0]), p.warn_mem.round(), |v| {
         prefs::update(|p| p.warn_mem = v)
-    });
-    g.add(&r);
-    let (r, _) = widgets::spin_row("Disk full (%)", "How full a mounted drive may get.", (50.0, 100.0, 1.0), p.warn_disk, |v| {
+    }));
+    g.add(&choice_row("A disk is fuller than", "", pcts(&[80.0, 85.0, 90.0, 95.0, 98.0]), p.warn_disk.round(), |v| {
         prefs::update(|p| p.warn_disk = v)
-    });
-    g.add(&r);
-
-    // ----- Alerts -----
-    let g = page.group("Alerts");
-    g.note(
-        "Desktop notifications, at most one of each kind every 5 minutes. They work while Activity is open, \
-         on screen or not. The process alert pauses while \"Rest while hidden\" has stopped reading processes.",
+    }));
+    let mins = |s: f64| {
+        if s < 60.0 {
+            format!("{s:.0} seconds")
+        } else if s < 120.0 {
+            "1 minute".into()
+        } else {
+            format!("{:.0} minutes", s / 60.0)
+        }
+    };
+    let mut busy: Vec<(f64, String)> = vec![(0.0, "Never".into())];
+    busy.extend([30.0, 60.0, 120.0, 300.0, 600.0].iter().map(|s| (*s, mins(*s))));
+    g.add(&choice_row(
+        "One process keeps the processor busy for",
+        &format!("Busy means over {} of the whole processor", fmt::pct(p.alert_proc_cpu)),
+        busy,
+        if p.alert_proc { p.alert_proc_secs as f64 } else { 0.0 },
+        |v| {
+            prefs::update(|p| {
+                p.alert_proc = v > 0.0;
+                if v > 0.0 {
+                    p.alert_proc_secs = v as u64;
+                }
+            })
+        },
+    ));
+    let (r, _) = widgets::switch_row(
+        "A service fails",
+        "A notification when one of yours or the system's stops with an error",
+        p.alert_services,
+        |on| prefs::update(|p| p.alert_services = on),
     );
-    let (r, _) = widgets::switch_row("CPU too hot", "Past the temperature warning above.", p.alert_temp, |on| {
-        prefs::update(|p| p.alert_temp = on)
-    });
-    g.add(&r);
-    let (r, _) = widgets::switch_row("Memory running out", "Past the memory warning above.", p.alert_mem, |on| {
-        prefs::update(|p| p.alert_mem = on)
-    });
-    g.add(&r);
-    let (r, _) = widgets::switch_row("A disk filling up", "Past the disk warning above.", p.alert_disk, |on| {
-        prefs::update(|p| p.alert_disk = on)
-    });
-    g.add(&r);
-    let (r, _) =
-        widgets::switch_row("A service failed", "A user or system service stops with an error.", p.alert_services, |on| {
-            prefs::update(|p| p.alert_services = on)
-        });
     g.add(&r);
     let (r, _) = widgets::switch_row(
-        "A process keeps the CPU busy",
-        "One process stays over the limit below for the time below.",
-        p.alert_proc,
-        |on| prefs::update(|p| p.alert_proc = on),
+        "Also as a notification",
+        "Past these, the Dashboard says so first; this tells you wherever you are, at most every 5 minutes",
+        p.alert_temp || p.alert_mem || p.alert_disk,
+        |on| {
+            prefs::update(|p| {
+                p.alert_temp = on;
+                p.alert_mem = on;
+                p.alert_disk = on;
+            })
+        },
     );
-    g.add(&r);
-    let (r, _) =
-        widgets::spin_row("Process CPU limit (%)", "Share of the whole processor.", (10.0, 100.0, 5.0), p.alert_proc_cpu, |v| {
-            prefs::update(|p| p.alert_proc_cpu = v)
-        });
-    g.add(&r);
-    let (r, _) = widgets::spin_row("For at least (seconds)", "", (5.0, 600.0, 5.0), p.alert_proc_secs as f64, |v| {
-        prefs::update(|p| p.alert_proc_secs = v as u64)
-    });
     g.add(&r);
 
     // ----- Processes -----
     let g = page.group("Processes");
-    let (r, _) = widgets::switch_row(
-        "Ask before ending tasks",
-        "End task and Kill need a second click to confirm.",
-        p.confirm_kill,
-        |on| prefs::update(|p| p.confirm_kill = on),
-    );
+    let (r, _) = widgets::switch_row("Ending an app", "Ask first: End task and Kill need a second click", p.confirm_kill, |on| {
+        prefs::update(|p| p.confirm_kill = on)
+    });
     g.add(&r);
     let (r, _) = widgets::switch_row(
         "Show kernel threads",
-        "List the kernel's own workers (kworker, ksoftirqd…) in All, and under System in Apps.",
+        "The kernel's own workers (kworker, ksoftirqd…), in All and under System",
         p.kernel_threads,
         |on| {
             prefs::update(|p| p.kernel_threads = on);
             super::processes::refilter();
         },
+    );
+    g.add(&r);
+
+    // ----- Export, shortcuts, about -----
+    let g = page.group("");
+    let (r, _) = widgets::button_row("Export graph history", "Every graph's history as a CSV file", "Export…", |_| {
+        crate::actions::export_csv("activity-history", None)
+    });
+    g.add(&r);
+    let (r, _) = widgets::button_row("Keyboard shortcuts", "Ctrl+K goes to any page, process or service", "Show…", |_| {
+        window::show_shortcuts()
+    });
+    g.add(&r);
+    let (r, _) = widgets::switch_row("Reduce motion", "No sliding or fading between pages", p.reduce_motion, |on| {
+        prefs::update(|p| p.reduce_motion = on)
+    });
+    g.add(&r);
+    let (r, _) = widgets::button_row(
+        &format!("Activity {}", env!("CARGO_PKG_VERSION")),
+        "Theme and accent follow Nyx Settings",
+        "Website",
+        |_| crate::cmd::spawn(&["xdg-open", "https://github.com/design-nexus/nyx-activity"]),
     );
     g.add(&r);
     g.note("To open Activity with a key, bind <tt>nyx-activity --toggle</tt> in <tt>~/.config/hypr/bindings.lua</tt>, for example Ctrl+Shift+Esc.");

@@ -1,31 +1,160 @@
 use super::top;
-use crate::charts::{self, Bar, PAIR};
+use crate::charts::{self, Bar};
 use crate::graph::{self, Scale, Series, Tone};
 use crate::sampler::Snapshot;
 use crate::sampler::net::{Iface, Kind};
 use crate::widgets::{self, Page};
-use crate::{fmt, live};
+use crate::{fmt, live, parts, prefs};
 use gtk::pango;
 use gtk::prelude::*;
+
+/// The links worth a lane: real ones, and virtual ones that are up.
+fn links(s: &Snapshot) -> Vec<&Iface> {
+    let mut shown: Vec<&Iface> = s.nets.iter().filter(|n| n.kind != Kind::Virtual || n.up).collect();
+    shown.sort_by_key(|n| (n.gateway.is_none(), !n.up, n.kind == Kind::Virtual, n.name.clone()));
+    shown
+}
+
+/// "Wi-Fi · SkyNet", "Ethernet", "Tailscale", or the link's own name.
+fn link_name(n: &Iface) -> String {
+    match n.kind {
+        Kind::Wifi => match n.ssid.as_ref().or(n.wifi.as_ref().and_then(|w| w.ssid.as_ref())) {
+            Some(ssid) => format!("Wi-Fi · {ssid}"),
+            None => "Wi-Fi".into(),
+        },
+        Kind::Ethernet => "Ethernet".into(),
+        Kind::Virtual if n.name.starts_with("tailscale") => "Tailscale".into(),
+        Kind::Virtual => n.name.clone(),
+    }
+}
+
+/// A link that's carried nothing in the graphs' range.
+fn quiet(name: &str) -> bool {
+    let rx = live::history(&format!("net.{name}.rx"));
+    let tx = live::history(&format!("net.{name}.tx"));
+    rx.iter().chain(&tx).all(|v| *v < 16.0)
+}
 
 pub fn build(page: &Page) {
     let holder = widgets::vbox(0);
     page.body.append(&holder);
     let page = Page { root: page.root.clone(), body: holder.clone() };
     live::ready(move |snap| {
-        let mut shown: Vec<&Iface> = snap.nets.iter().filter(|n| n.kind != Kind::Virtual || n.up).collect();
-        shown.sort_by_key(|n| (!n.up, n.kind == Kind::Virtual));
+        let shown = links(snap);
+        let g = page.cards("");
+        let head = parts::head("Network", "");
+        head.root.append(&parts::range());
+        g.add(&head.root);
+        live::on_tick(&head.root, move |s| {
+            let l = links(s);
+            let online = l.iter().filter(|n| n.gateway.is_some()).count();
+            head.line.set_text(&format!(
+                "{} · {}",
+                if l.len() == 1 { "1 link".to_string() } else { format!("{} links", l.len()) },
+                match online {
+                    0 => "none connected to the internet".to_string(),
+                    1 => "1 connected to the internet".to_string(),
+                    n => format!("{n} connected to the internet"),
+                }
+            ));
+        });
         if shown.is_empty() {
-            holder.append(&widgets::banner("No network interfaces are up.", false));
+            g.add(&widgets::banner("No network interfaces are up.", false));
+            return;
         }
-        for n in shown {
-            iface_section(&page, n);
-        }
-        overall(&page);
+        g.add(&lanes(&shown));
+        let conns = connections();
+        let main = shown[0];
+        let details = link_details(main);
+        g.add(&parts::columns(&[conns.upcast_ref(), details.upcast_ref()], 2));
     });
 }
 
-/// Processes with the most open connections, by app.
+// ---------- Lanes ----------
+
+/// Every link as a lane of traffic on one clock; a quiet one is a thin line.
+fn lanes(shown: &[&Iface]) -> gtk::Box {
+    let card = widgets::vbox(0);
+    card.add_css_class("graph-card");
+    card.add_css_class("net-lanes");
+    let grid = gtk::Grid::new();
+    grid.set_column_spacing(18);
+    grid.set_row_spacing(10);
+    let mut rows = Vec::new();
+    for (i, n) in shown.iter().enumerate() {
+        let name = n.name.clone();
+        let label = widgets::vbox(1);
+        label.set_valign(gtk::Align::Center);
+        let title = widgets::label(&link_name(n), "net-lane-name");
+        title.set_xalign(0.0);
+        title.set_ellipsize(pango::EllipsizeMode::End);
+        title.set_width_chars(14);
+        title.set_max_width_chars(20);
+        title.set_tooltip_text(Some(&n.name));
+        let sub = widgets::label("", "net-lane-sub");
+        sub.add_css_class("tnum");
+        sub.set_xalign(0.0);
+        label.append(&title);
+        label.append(&sub);
+        let main = i == 0 && n.gateway.is_some();
+        let spark = graph::sparkline(
+            vec![
+                Series::new(format!("net.{name}.rx"), "Down", Tone::Swatch(if main { "pink" } else { "blue" })),
+                Series {
+                    dashed: true,
+                    ..Series::new(format!("net.{name}.tx"), "Up", Tone::Swatch(if main { "pink" } else { "blue" }))
+                },
+            ],
+            Scale::Auto { floor: 1024.0 },
+            if main { 70 } else { 30 },
+            fmt::net_rate,
+        );
+        let flat = widgets::hbox(0);
+        flat.add_css_class("net-flat");
+        flat.set_valign(gtk::Align::Center);
+        flat.set_hexpand(true);
+        let stack = gtk::Stack::new();
+        stack.set_hexpand(true);
+        stack.set_vhomogeneous(false);
+        stack.add_named(&spark, Some("graph"));
+        stack.add_named(&flat, Some("flat"));
+        grid.attach(&label, 0, i as i32, 1, 1);
+        grid.attach(&stack, 1, i as i32, 1, 1);
+        rows.push((name, sub, stack));
+    }
+    let axis = widgets::hbox(0);
+    let ago = widgets::label("", "graph-axis");
+    ago.set_hexpand(true);
+    ago.set_xalign(0.0);
+    axis.append(&ago);
+    axis.append(&widgets::label("now", "graph-axis"));
+    grid.attach(&axis, 1, rows.len() as i32, 1, 1);
+    card.append(&grid);
+    live::on_tick(&card, move |s| {
+        ago.set_text(&format!("{} ago", fmt::duration(prefs::get().history_secs as f64)));
+        for (name, sub, stack) in &rows {
+            let Some(n) = s.nets.iter().find(|x| &x.name == name) else {
+                sub.set_text("Gone");
+                stack.set_visible_child_name("flat");
+                continue;
+            };
+            let q = quiet(name);
+            stack.set_visible_child_name(if q { "flat" } else { "graph" });
+            sub.set_text(&if !n.up {
+                "Not connected".to_string()
+            } else if q {
+                "Quiet".to_string()
+            } else {
+                format!("{} ↓ · {} ↑", fmt::net_rate(n.rx_bps), fmt::net_rate(n.tx_bps))
+            });
+        }
+    });
+    card
+}
+
+// ---------- Connections ----------
+
+/// Apps with the most open connections.
 fn conn_bars(s: &Snapshot) -> Vec<Bar> {
     let Some(c) = &s.conns else { return Vec::new() };
     let mut by_group: Vec<((String, String), i32, usize)> = Vec::new();
@@ -44,7 +173,7 @@ fn conn_bars(s: &Snapshot) -> Vec<Bar> {
         }
     }
     by_group.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.0.cmp(&b.0.0)));
-    by_group.truncate(8);
+    by_group.truncate(5);
     let max = by_group.first().map_or(1, |g| g.2).max(1) as f64;
     by_group
         .into_iter()
@@ -52,250 +181,124 @@ fn conn_bars(s: &Snapshot) -> Vec<Bar> {
             name,
             icon,
             frac: n as f64 / max,
-            value: if n == 1 { "1 conn.".into() } else { format!("{n} conn.") },
+            value: format!("{n} open"),
             tip: String::new(),
             pid: leader,
-            warn: false,
         })
         .collect()
 }
 
-fn overall(page: &Page) {
-    let g = page.cards("Connections");
-    let down = charts::tile("Download");
-    let up = charts::tile("Upload");
-    let open = charts::tile("Open connections");
+fn connections() -> gtk::Box {
+    let c = parts::card("network-transmit-receive-symbolic", "Connections");
+    let open = charts::tile("Open");
     let listen = charts::tile("Listening");
-    g.add(&charts::row(&[down.root.upcast_ref(), up.root.upcast_ref(), open.root.upcast_ref(), listen.root.upcast_ref()], 150));
-
-    let apps = charts::bar_list(8, "No open connections.", true);
-    let (apps_card, apps_sum) = charts::card("Apps with connections", &apps.root);
-    apps_card.set_tooltip_text(Some("Open TCP connections each app holds (only your own processes can be seen)"));
-
-    let states = charts::stack_bar(&["Open", "Closing", "Waiting to close", "Other"], None);
-    let ports = widgets::vbox(0);
-    ports.add_css_class("bar-list");
-    let ports_box = widgets::vbox(12);
-    ports_box.append(&states.root);
-    ports_box.append(&widgets::label("LISTENING", "stat-title"));
-    ports_box.append(&ports);
-    let (ports_card, ports_sum) = charts::card("Sockets", &ports_box);
-    g.add(&apps_card);
-    let sockets = widgets::vbox(12);
-    sockets.append(&ports_card);
-    let gr = graph::graph(vec![Series::new("net.conns", "Open", Tone::Accent)], Scale::Auto { floor: 20.0 }, fmt::count, 120);
-    let (connection_history, _) = charts::card("Connection history", &gr.root);
-    sockets.append(&connection_history);
-    g.add(&widgets::disclosure("network.sockets", "Sockets and listening ports", &sockets));
-
-    let port_rows: Vec<(gtk::Box, gtk::Label, gtk::Label, gtk::Label)> = (0..8)
-        .map(|_| {
-            let r = widgets::hbox(10);
-            r.add_css_class("port-row");
-            let port = widgets::label("", "bar-name");
-            port.add_css_class("tnum");
-            port.set_width_chars(10);
-            let who = widgets::label("", "bar-name");
-            who.set_hexpand(true);
-            who.set_ellipsize(pango::EllipsizeMode::End);
-            let scope = widgets::label("", "bar-value");
-            r.append(&port);
-            r.append(&who);
-            r.append(&scope);
-            ports.append(&r);
-            (r, port, who, scope)
-        })
-        .collect();
-
-    live::on_tick(&down.root, move |s| {
-        let rx = s.net_rx();
-        let tx = s.net_tx();
-        down.value.set_text(&fmt::net_rate(rx));
-        up.value.set_text(&fmt::net_rate(tx));
-        let phys = s.nets.iter().filter(|n| n.kind != Kind::Virtual);
-        let (rt, tt) = phys.fold((0u64, 0u64), |(r, t), n| (r + n.rx_total, t + n.tx_total));
-        down.sub.set_text(&format!("{} since connecting", fmt::bytes(rt as f64)));
-        up.sub.set_text(&format!("{} since connecting", fmt::bytes(tt as f64)));
-        let Some(c) = &s.conns else {
-            open.value.set_text("–");
-            open.sub.set_text("Not available");
-            listen.value.set_text("–");
-            listen.sub.set_text("Not available");
-            apps.set(&[]);
-            apps_sum.set_text("Not available");
-            ports_sum.set_text("Not available");
-            for (row, ..) in &port_rows {
-                row.set_visible(false);
+    let closing = charts::tile("Waiting to close");
+    c.root.append(&parts::readings(&[&open, &listen, &closing]));
+    let apps = parts::app_list(5, "No open connections.", false);
+    c.root.append(&apps.root);
+    c.root.set_tooltip_text(Some("Open TCP connections each app holds (only your own processes can be seen)"));
+    live::on_tick(&c.root, move |s| {
+        let Some(k) = &s.conns else {
+            for t in [&open, &listen, &closing] {
+                t.value.set_text("–");
+                t.sub.set_text("not available");
             }
+            apps.set(&[]);
             return;
         };
-        open.value.set_text(&c.established.to_string());
-        open.sub.set_text(&format!("{} UDP sockets", c.udp));
-        let public = c.listeners.iter().filter(|l| l.public()).count();
-        listen.value.set_text(&c.listeners.len().to_string());
+        open.value.set_text(&k.established.to_string());
+        open.sub.set_text(&format!("TCP · {} UDP sockets", k.udp));
+        let public = k.listeners.iter().filter(|l| l.public()).count();
+        listen.value.set_text(&k.listeners.len().to_string());
         listen.sub.set_text(&format!("{public} reachable from the network"));
-        widgets::set_warn(&listen.sub, false);
-
-        apps.set(&conn_bars(s));
-        apps_sum.set_text(&format!("{} open", c.established));
-        let parts = [c.established as f64, c.close_wait as f64, c.time_wait as f64, (c.other + c.listening) as f64];
-        let total: f64 = parts.iter().sum();
-        states.set(&parts, total.max(1.0), &parts.map(|v| (v as u64).to_string()));
-        ports_sum.set_text(&format!("{} TCP · {} UDP", total as u64, c.udp));
-        let procs = s.procs.as_deref().unwrap_or(&[]);
-        for (i, (row, port, who, scope)) in port_rows.iter().enumerate() {
-            let Some(l) = c.listeners.get(i) else {
-                row.set_visible(false);
-                continue;
-            };
-            row.set_visible(true);
-            port.set_text(&format!("{} {}", if l.udp { "UDP" } else { "TCP" }, l.port));
-            let name = procs.iter().find(|p| p.pid == l.pid).map(|p| p.name.clone());
-            who.set_text(&name.unwrap_or_else(|| "system".into()));
-            scope.set_text(if l.public() { "network" } else { "this computer" });
-            row.set_tooltip_text(Some(&format!("Listening on {}:{}", l.addr, l.port)));
-        }
+        closing.value.set_text(&(k.close_wait + k.time_wait).to_string());
+        closing.sub.set_text("");
+        apps.set(&conn_bars(s).into_iter().map(|b| parts::App::from_bar(b, String::new())).collect::<Vec<_>>());
     });
+    c.root
 }
 
-fn iface_section(page: &Page, n: &Iface) {
-    let kind = match n.kind {
-        Kind::Wifi => "Wi-Fi",
-        Kind::Ethernet => "Ethernet",
-        Kind::Virtual => "Virtual",
-    };
-    let g = page.cards(&format!("{kind} · {}", n.name));
-    let name = n.name.clone();
-    let wifi = n.kind == Kind::Wifi;
+// ---------- The link ----------
 
-    let gr = graph::graph(
-        vec![
-            Series::new(format!("net.{name}.rx"), "Download", Tone::Accent),
-            Series::new(format!("net.{name}.tx"), "Upload", Tone::Second),
-        ],
-        Scale::Auto { floor: 64.0 * 1024.0 },
-        fmt::net_rate,
-        130,
-    );
-    let (traffic, traffic_sum) = charts::card("Traffic", &gr.root);
-
-    // The link: signal for Wi-Fi, how much of the line is used for wired.
-    let items: Vec<(&str, Option<usize>)> = if wifi {
-        vec![("Network", None), ("Band", None), ("Channel", None), ("Standard", None), ("Link speed", None)]
-    } else {
-        vec![("State", None), ("Link speed", None), ("MTU", None), ("Errors", None), ("Dropped", None)]
-    };
-    let link_body = widgets::vbox(12);
-    let signal = widgets::label("–", "stat-value");
-    signal.add_css_class("tnum");
-    link_body.append(&signal);
-    let (legend, lv) = charts::legend(&items);
-    link_body.append(&legend);
-    let (link, link_sum) = charts::card("Connection", &link_body);
-    g.add(&charts::primary(&link, &traffic));
-    let diagnostics = widgets::vbox(12);
-
-    let gr = graph::graph(
-        vec![
-            Series::new(format!("net.{name}.rxp"), "Received", Tone::Accent),
-            Series::new(format!("net.{name}.txp"), "Sent", Tone::Second),
-        ],
-        Scale::Auto { floor: 100.0 },
-        fmt::per_sec,
-        100,
-    );
-    let (packets, packets_sum) = charts::card("Packets", &gr.root);
-    if wifi {
-        let gr =
-            graph::graph(vec![Series::new(format!("net.{name}.signal"), "Signal", Tone::Accent)], Scale::Percent, fmt::pct, 100);
-        let (sig, _) = charts::card("Signal over time", &gr.root);
-        diagnostics.append(&charts::row(&[sig.upcast_ref(), packets.upcast_ref()], PAIR));
-    } else {
-        diagnostics.append(&packets);
+fn kv_rows(card: &gtk::Box, keys: &[&str]) -> Vec<gtk::Label> {
+    let list = widgets::vbox(0);
+    list.add_css_class("kv-list");
+    let mut out = Vec::new();
+    for k in keys {
+        let row = widgets::hbox(12);
+        row.add_css_class("kv-row");
+        let key = widgets::label(k, "kv-key");
+        key.set_xalign(0.0);
+        let v = widgets::label("–", "kv-value");
+        v.add_css_class("tnum");
+        v.set_hexpand(true);
+        v.set_xalign(1.0);
+        v.set_ellipsize(pango::EllipsizeMode::Start);
+        row.append(&key);
+        row.append(&v);
+        list.append(&row);
+        out.push(v);
     }
+    card.append(&list);
+    out
+}
 
-    let spec = widgets::vbox(0);
-    spec.add_css_class("graph-card");
-    spec.add_css_class("spec-card");
-    let (flow, v) =
-        widgets::kv_flow(&["Addresses", "Gateway", "DNS", "Hardware address", "Received", "Sent", "Errors", "Dropped"]);
-    spec.append(&flow);
-    diagnostics.append(&spec);
-    g.add(&widgets::disclosure(&format!("network.{name}.details"), "Link diagnostics and configuration", &diagnostics));
-
-    live::on_tick(&traffic, move |s| {
-        let Some(n) = s.nets.iter().find(|x| x.name == name) else {
-            traffic_sum.set_text("Gone");
-            return;
-        };
-        traffic_sum.set_text(&format!("↓ {}  ↑ {}", fmt::net_rate(n.rx_bps), fmt::net_rate(n.tx_bps)));
-        packets_sum.set_text(&format!("{} errors · {} dropped", fmt::count(n.errors as f64), fmt::count(n.drops as f64)));
+/// The link that reaches the internet, in words.
+fn link_details(n: &Iface) -> gtk::Box {
+    let wifi = n.kind == Kind::Wifi;
+    let title = if wifi { "Wi-Fi".to_string() } else { link_name(n) };
+    let c = parts::card(if wifi { "network-wireless-symbolic" } else { "network-wired-symbolic" }, &title);
+    let keys: &[&str] = if wifi {
+        &["Signal", "Band", "Standard", "Link speed", "Address"]
+    } else {
+        &["State", "Link speed", "Address", "Gateway", "DNS"]
+    };
+    let v = kv_rows(&c.root, keys);
+    let name = n.name.clone();
+    live::on_tick(&c.root, move |s| {
+        let Some(n) = s.nets.iter().find(|x| x.name == name) else { return };
         let dash = || "–".to_string();
+        c.meta.set_text(&n.name);
+        let addr = n.addrs.first().map(|a| a.split('/').next().unwrap_or(a).to_string()).unwrap_or_else(dash);
         if wifi {
             let w = n.wifi.clone().unwrap_or_default();
-            match n.signal {
-                Some(dbm) => {
-                    let q = fmt::signal_quality(dbm);
-                    signal.set_text(&format!("{dbm:.0} dBm"));
-                    widgets::set_warn(&signal, q < 30.0);
-                    link_sum.set_text(quality(dbm));
-                }
-                None => {
-                    signal.set_text("–");
-                    widgets::set_warn(&signal, false);
-                    link_sum.set_text(if n.up { "" } else { "Disconnected" });
-                }
+            v[0].set_text(
+                &n.signal
+                    .map(|d| format!("{} · {d:.0} dBm", quality(d)))
+                    .unwrap_or_else(|| if n.up { dash() } else { "Not connected".into() }),
+            );
+            let mut band = Vec::new();
+            if let Some(b) = w.band() {
+                band.push(b.to_string());
             }
-            lv[0].set_text(w.ssid.as_deref().unwrap_or(if n.up { "–" } else { "Disconnected" }));
-            lv[1].set_text(w.band().unwrap_or("–"));
-            lv[2].set_text(&match (w.channel(), &w.width) {
-                (Some(c), Some(wd)) => format!("{c} · {wd}"),
-                (Some(c), None) => c.to_string(),
-                _ => dash(),
-            });
-            lv[3].set_text(w.standard.unwrap_or("–"));
-            lv[4].set_text(&match (w.rx_rate, w.tx_rate) {
-                (Some(r), Some(t)) => format!("↓ {r:.0} · ↑ {t:.0} Mb/s"),
+            if let Some(ch) = w.channel() {
+                band.push(format!("channel {ch}"));
+            }
+            if let Some(wd) = &w.width {
+                band.push(wd.clone());
+            }
+            v[1].set_text(&if band.is_empty() { dash() } else { band.join(" · ") });
+            v[2].set_text(w.standard.unwrap_or("–"));
+            v[3].set_text(&match (w.rx_rate, w.tx_rate) {
+                (Some(r), Some(t)) => format!("{r:.0} Mb/s down · {t:.0} up"),
                 (Some(r), None) => format!("{r:.0} Mb/s"),
                 _ => dash(),
             });
+            v[4].set_text(&addr);
         } else {
-            let speed = n.speed_mbps.map(|m| m as f64 * 1e6 / 8.0);
-            let used = n.rx_bps.max(n.tx_bps);
-            match speed {
-                Some(sp) if sp > 0.0 => {
-                    let f = used / sp;
-                    signal.set_text(&format!("{} of link", fmt::pct(f * 100.0)));
-                    widgets::set_warn(&signal, f > 0.9);
-                }
-                _ => {
-                    signal.set_text(if n.up { "Up" } else { "Down" });
-                    widgets::set_warn(&signal, false);
-                }
-            }
-            link_sum.set_text(if n.up { "Connected" } else { "Down" });
-            lv[0].set_text(if n.up { "Connected" } else { "Down" });
-            lv[1].set_text(
+            v[0].set_text(if n.up { "Connected" } else { "Not connected" });
+            v[1].set_text(
                 &n.speed_mbps
                     .map(|m| if m >= 1000 { format!("{} Gb/s", m / 1000) } else { format!("{m} Mb/s") })
                     .unwrap_or_else(dash),
             );
-            lv[2].set_text(&if n.mtu > 0 { n.mtu.to_string() } else { dash() });
-            lv[3].set_text(&fmt::count(n.errors as f64));
-            lv[4].set_text(&fmt::count(n.drops as f64));
+            v[2].set_text(&addr);
+            v[3].set_text(n.gateway.as_deref().unwrap_or("–"));
+            v[4].set_text(&if n.dns.is_empty() { dash() } else { n.dns.join(", ") });
         }
-        let addrs = if n.addrs.is_empty() { dash() } else { n.addrs.join("\n") };
-        v[0].set_text(n.addrs.first().map(String::as_str).unwrap_or("–"));
-        v[0].set_tooltip_text(Some(&addrs));
-        v[1].set_text(n.gateway.as_deref().unwrap_or("–"));
-        v[2].set_text(&if n.dns.is_empty() { dash() } else { n.dns.join(", ") });
-        v[2].set_tooltip_text(Some(&n.dns.join("\n")));
-        v[3].set_text(if n.mac.is_empty() { "–" } else { &n.mac });
-        v[4].set_text(&fmt::bytes(n.rx_total as f64));
-        v[5].set_text(&fmt::bytes(n.tx_total as f64));
-        v[6].set_text(&fmt::count(n.errors as f64));
-        v[7].set_text(&fmt::count(n.drops as f64));
+        v[if wifi { 4 } else { 2 }].set_tooltip_text(Some(&n.addrs.join("\n")));
     });
+    c.root
 }
 
 fn quality(dbm: f64) -> &'static str {

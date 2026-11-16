@@ -9,7 +9,7 @@ use crate::graph::{self, Scale, Series, Tone};
 use crate::sampler::Snapshot;
 use crate::sampler::gpu::Power;
 use crate::widgets::{self, Page};
-use crate::{charts, cmd, fmt, live, prefs, window};
+use crate::{charts, cmd, fmt, live, parts, prefs, window};
 use gtk::prelude::*;
 use gtk::{cairo, gdk, glib, pango};
 use std::cell::{Cell, RefCell};
@@ -69,7 +69,7 @@ const GAP: i32 = 12;
 pub fn columns_for(width: i32) -> usize {
     if width >= 940 {
         3
-    } else if width >= 520 {
+    } else if width >= 760 {
         2
     } else {
         1
@@ -291,9 +291,11 @@ fn move_card(from: &str, to: &str) {
 
 // ---------- Cards ----------
 
-/// A card: its icon and title (and a note beside it), a link to its page, then `body`.
+/// A card: its icon and title (and a note beside it), then `body`. The whole card opens
+/// its page, with a chevron in the corner to say so; `more` names a link instead.
 /// While editing, a grip to drag it by and Hide take the link's place.
-fn card(id: &'static str, icon: &str, more: &str, go: impl Fn() + 'static, span: usize) -> (Card, gtk::Label) {
+fn card(id: &'static str, icon: &str, more: Option<&str>, go: impl Fn() + 'static, span: usize) -> (Card, gtk::Label) {
+    let go = Rc::new(go);
     let title = CARDS.iter().find(|(c, _)| *c == id).map_or(id, |(_, t)| *t);
     let root = widgets::vbox(6);
     root.add_css_class("dash-card");
@@ -315,10 +317,30 @@ fn card(id: &'static str, icon: &str, more: &str, go: impl Fn() + 'static, span:
     meta.set_hexpand(true);
     meta.set_ellipsize(pango::EllipsizeMode::End);
     head.append(&meta);
-    let more_b = gtk::Button::with_label(more);
+    let more_b = match more {
+        Some(text) => gtk::Button::with_label(text),
+        None => {
+            let b = gtk::Button::from_icon_name("pan-end-symbolic");
+            b.add_css_class("dash-chevron");
+            b.set_tooltip_text(Some(&format!("Open {title}")));
+            // The whole card opens the page.
+            let click = gtk::GestureClick::new();
+            let g = go.clone();
+            click.connect_released(move |gesture, _, _, _| {
+                if !editing() {
+                    gesture.set_state(gtk::EventSequenceState::Claimed);
+                    g();
+                }
+            });
+            root.add_controller(click);
+            root.add_css_class("opens");
+            b
+        }
+    };
     more_b.add_css_class("flat");
     more_b.add_css_class("dash-more");
-    more_b.connect_clicked(move |_| go());
+    let g = go.clone();
+    more_b.connect_clicked(move |_| g());
     head.append(&more_b);
     let hide = widgets::icon_button("view-reveal-symbolic", &format!("Hide {title}"));
     hide.add_css_class("dash-hide");
@@ -375,21 +397,40 @@ fn card(id: &'static str, icon: &str, more: &str, go: impl Fn() + 'static, span:
     (Card { id, root, grip, more: more_b, hide }, meta)
 }
 
-/// The big reading at the top of a card, with a smaller note after it.
-fn big_value(card: &gtk::Box) -> (gtk::Label, gtk::Label) {
-    let row = widgets::hbox(8);
-    row.add_css_class("dash-big");
+/// The reading at the top of a card: what it is, the value, and a line under it.
+fn big_value(card: &gtk::Box, caption: &str) -> (gtk::Label, gtk::Label) {
+    let col = widgets::vbox(1);
+    col.add_css_class("dash-big");
+    let c = widgets::label(&caption.to_uppercase(), "stat-title");
+    c.set_xalign(0.0);
     let v = widgets::label("–", "dash-value");
     v.add_css_class("tnum");
-    v.set_valign(gtk::Align::BaselineFill);
+    v.set_xalign(0.0);
     let s = widgets::label("", "dash-sub");
     s.add_css_class("tnum");
-    s.set_valign(gtk::Align::BaselineFill);
+    s.set_xalign(0.0);
     s.set_ellipsize(pango::EllipsizeMode::End);
-    row.append(&v);
-    row.append(&s);
-    card.append(&row);
+    col.append(&c);
+    col.append(&v);
+    col.append(&s);
+    card.append(&col);
     (v, s)
+}
+
+/// A graph that fills the rest of its card, with its scale and time axis.
+fn card_graph(card: &gtk::Box, series: Vec<Series>, scale: Scale, f: fn(f64) -> String) {
+    let g = graph::graph(series, scale, f, 56);
+    // The reading above says what the lines are.
+    if let Some(legend) = g.root.first_child() {
+        legend.set_visible(false);
+        if let Some(plot) = legend.next_sibling() {
+            plot.set_vexpand(true);
+        }
+    }
+    g.root.set_vexpand(true);
+    g.root.set_valign(gtk::Align::End);
+    g.root.add_css_class("dash-graph");
+    card.append(&g.root);
 }
 
 /// A dim line of small print at the foot of a card.
@@ -423,58 +464,10 @@ fn track_alpha() -> f64 {
     if crate::theme::palette().light { 0.09 } else { 0.07 }
 }
 
-/// One cell per thread, brighter the busier it is.
-fn heat_strip() -> gtk::DrawingArea {
-    let area = gtk::DrawingArea::new();
-    area.set_content_height(14);
-    area.set_hexpand(true);
-    area.add_css_class("dash-heat");
-    let cores: Rc<RefCell<Vec<f64>>> = Rc::default();
-    {
-        let cores = cores.clone();
-        area.set_draw_func(move |_, cr, w, h| {
-            let cores = cores.borrow();
-            let n = cores.len().max(1) as f64;
-            let gap = if n > 24.0 { 2.0 } else { 3.0 };
-            let cw = ((w as f64 - gap * (n - 1.0)) / n).max(1.0);
-            let c = charts::swatch("blue");
-            for (i, v) in cores.iter().enumerate() {
-                rounded(cr, i as f64 * (cw + gap), 0.0, cw, h as f64, 3.0);
-                let a = 0.14 + 0.86 * (v / 100.0).clamp(0.0, 1.0);
-                cr.set_source_rgba(c.0, c.1, c.2, a);
-                let _ = cr.fill();
-            }
-        });
-    }
-    let motion = gtk::EventControllerMotion::new();
-    {
-        let (cores, a) = (cores.clone(), area.clone());
-        motion.connect_motion(move |_, x, _| {
-            let cores = cores.borrow();
-            let n = cores.len();
-            if n == 0 || a.width() == 0 {
-                return;
-            }
-            let i = ((x / a.width() as f64) * n as f64).floor().clamp(0.0, n as f64 - 1.0) as usize;
-            a.set_tooltip_text(Some(&format!("Thread {}: {}", i, fmt::pct(cores[i]))));
-        });
-    }
-    area.add_controller(motion);
-    let a = area.clone();
-    live::on_tick(&area, move |s| {
-        if *cores.borrow() != s.cpu.cores {
-            *cores.borrow_mut() = s.cpu.cores.clone();
-            a.queue_draw();
-        }
-    });
-    area
-}
-
 fn cpu_card() -> Card {
-    let (c, meta) = card("cpu", "activity-cpu-symbolic", "Details", || window::navigate("cpu"), 2);
-    let (v, sub) = big_value(&c.root);
-    c.root.append(&spark("cpu", "blue", Scale::Percent, 84, fmt::pct));
-    c.root.append(&heat_strip());
+    let (c, meta) = card("cpu", "activity-cpu-symbolic", None, || window::navigate("cpu"), 1);
+    let (v, sub) = big_value(&c.root, "Busy");
+    card_graph(&c.root, vec![Series::new("cpu", "Busy", Tone::Swatch("blue"))], Scale::Percent, fmt::pct);
     live::on_tick(&c.root, move |s| {
         meta.set_text(&format!("{} threads", s.cpu.cores.len()));
         v.set_text(&fmt::pct(s.cpu.usage));
@@ -490,10 +483,10 @@ fn cpu_card() -> Card {
 }
 
 /// The parts of a split bar and what they're out of.
-type Parts = Rc<RefCell<(Vec<f64>, f64)>>;
+pub(crate) type Parts = Rc<RefCell<(Vec<f64>, f64)>>;
 
 /// A bar split into swatch-coloured parts over a track, out of `total`.
-fn split_bar(colours: &'static [&'static str]) -> (gtk::DrawingArea, Parts) {
+pub(crate) fn split_bar(colours: &'static [&'static str]) -> (gtk::DrawingArea, Parts) {
     let area = gtk::DrawingArea::new();
     area.set_content_height(10);
     area.set_hexpand(true);
@@ -524,7 +517,7 @@ fn split_bar(colours: &'static [&'static str]) -> (gtk::DrawingArea, Parts) {
 }
 
 /// "■ Apps 16.0 GiB" keys under a split bar.
-fn key_row(names: &[(&str, &'static str)]) -> (gtk::Box, Vec<gtk::Label>) {
+pub(crate) fn key_row(names: &[(&str, &'static str)]) -> (gtk::Box, Vec<gtk::Label>) {
     let row = widgets::hbox(14);
     row.add_css_class("dash-keys");
     let mut values = Vec::new();
@@ -569,8 +562,8 @@ pub fn used_of(used: f64, total: f64) -> String {
 
 fn mem_card() -> Card {
     const PARTS: &[&str] = &["amber", "violet", "teal"];
-    let (c, _) = card("mem", "activity-memory-symbolic", "Details", || window::navigate("memory"), 1);
-    let (v, sub) = big_value(&c.root);
+    let (c, _) = card("mem", "activity-memory-symbolic", None, || window::navigate("memory"), 1);
+    let (v, sub) = big_value(&c.root, "In use");
     let (bar, parts) = split_bar(PARTS);
     bar.set_margin_top(4);
     c.root.append(&bar);
@@ -637,10 +630,12 @@ fn fill_bar() -> (gtk::DrawingArea, Rc<Cell<(f64, bool)>>) {
 }
 
 fn storage_card() -> Card {
-    let (c, _) = card("storage", "drive-harddisk-symbolic", "Details", || window::navigate("storage"), 1);
+    let (c, _) = card("storage", "drive-harddisk-symbolic", None, || window::navigate("storage"), 1);
     let rows = gtk::Grid::new();
     rows.set_column_spacing(10);
     rows.set_row_spacing(6);
+    rows.set_row_homogeneous(true);
+    rows.set_vexpand(true);
     rows.add_css_class("dash-mounts");
     c.root.append(&rows);
     let io = foot(&c.root);
@@ -695,24 +690,21 @@ fn storage_card() -> Card {
 }
 
 fn net_card() -> Card {
-    let (c, _) = card("net", "network-wireless-symbolic", "Details", || window::navigate("network"), 1);
-    let (v, sub) = big_value(&c.root);
-    let g = graph::sparkline(
+    let (c, _) = card("net", "network-wireless-symbolic", None, || window::navigate("network"), 1);
+    let (v, sub) = big_value(&c.root, "Down");
+    card_graph(
+        &c.root,
         vec![
             Series::new("net.rx", "Down", Tone::Swatch("pink")),
             Series { dashed: true, ..Series::new("net.tx", "Up", Tone::Swatch("pink")) },
         ],
-        Scale::Auto { floor: 64.0 * 1024.0 },
-        54,
+        Scale::Auto { floor: 8.0 * 1024.0 },
         fmt::net_rate,
     );
-    g.set_vexpand(true);
-    g.set_valign(gtk::Align::End);
-    c.root.append(&g);
     let link = foot(&c.root);
     live::on_tick(&c.root, move |s| {
         v.set_text(&fmt::net_rate(s.net_rx()));
-        sub.set_text(&format!("down · {} up", fmt::net_rate(s.net_tx())));
+        sub.set_text(&format!("{} up", fmt::net_rate(s.net_tx())));
         link.set_text(&link_text(s));
     });
     c
@@ -762,11 +754,10 @@ fn short_gpu(name: &str) -> String {
 }
 
 fn gpu_card() -> Card {
-    let (c, _) = card("gpu", "activity-gpu-symbolic", "Details", || window::navigate("gpu"), 1);
-    let (v, sub) = big_value(&c.root);
+    let (c, _) = card("gpu", "activity-gpu-symbolic", None, || window::navigate("gpu"), 1);
+    let (v, sub) = big_value(&c.root, "Busy");
     let holder = widgets::vbox(0);
     holder.set_vexpand(true);
-    holder.set_valign(gtk::Align::End);
     c.root.append(&holder);
     let engines = foot(&c.root);
     let shown_pci: RefCell<String> = RefCell::default();
@@ -781,7 +772,12 @@ fn gpu_card() -> Card {
             while let Some(ch) = holder.first_child() {
                 holder.remove(&ch);
             }
-            holder.append(&spark(&format!("gpu.{}.util", g.pci), "violet", Scale::Percent, 54, fmt::pct));
+            card_graph(
+                &holder,
+                vec![Series::new(format!("gpu.{}.util", g.pci), "Busy", Tone::Swatch("violet"))],
+                Scale::Percent,
+                fmt::pct,
+            );
             *shown_pci.borrow_mut() = g.pci.clone();
         }
         let mut note = vec![short_gpu(&g.name)];
@@ -818,8 +814,11 @@ fn gpu_card() -> Card {
 }
 
 fn sensors_card() -> Card {
-    let (c, _) = card("sensors", "activity-thermometer-symbolic", "Details", || window::navigate("sensors"), 1);
+    let (c, _) = card("sensors", "activity-thermometer-symbolic", None, || window::navigate("sensors"), 1);
     let list = widgets::vbox(2);
+    // The rows spread down the card, level with its neighbours' graphs.
+    list.set_homogeneous(true);
+    list.set_vexpand(true);
     c.root.append(&list);
     let names = ["CPU package", "NVMe", "GPU", "Fans", "Battery"];
     let mut rows = Vec::new();
@@ -872,22 +871,6 @@ pub(crate) fn app_swatch(name: &str) -> &'static str {
     APP_SWATCHES[h % APP_SWATCHES.len()]
 }
 
-/// A square in a swatch picked by the app's name, with its first letter.
-fn letter_tile(name: &str) -> gtk::Box {
-    let tile = widgets::hbox(0);
-    tile.add_css_class("app-letter");
-    // The swatch's class sets `color`, which the tile's CSS paints as its background.
-    tile.add_css_class(&format!("section-swatch-{}", app_swatch(name)));
-    tile.set_valign(gtk::Align::Center);
-    tile.set_halign(gtk::Align::Start);
-    tile.set_hexpand(false);
-    let l = gtk::Label::new(name.chars().next().map(|c| c.to_uppercase().to_string()).as_deref());
-    l.set_halign(gtk::Align::Center);
-    l.set_width_chars(2);
-    tile.append(&l);
-    tile
-}
-
 /// 2140 → "2,140".
 pub(crate) fn thousands(n: u64) -> String {
     let s = n.to_string();
@@ -902,53 +885,22 @@ pub(crate) fn thousands(n: u64) -> String {
 }
 
 fn busiest_card() -> Card {
-    let (c, _) = card("busiest", "view-list-bullet-symbolic", "All processes", || window::navigate("processes"), 2);
-    let list = widgets::vbox(0);
-    c.root.append(&list);
-    let empty = widgets::label("", "dash-foot");
-    empty.set_xalign(0.0);
-    c.root.append(&empty);
+    let (c, _) = card("busiest", "view-list-bullet-symbolic", Some("All processes"), || window::navigate("processes"), 2);
+    let list = parts::app_list(5, "Nothing busy right now.", true);
+    c.root.append(&list.root);
     live::on_tick(&c.root, move |s| {
-        while let Some(ch) = list.first_child() {
-            list.remove(&ch);
+        if s.procs.is_none() {
+            list.set(&[]);
+            return;
         }
-        let mut gs: Vec<_> = s.groups.iter().filter(|g| g.cpu > 0.0 || g.memory() > 0).collect();
-        gs.sort_by(|a, b| b.cpu.total_cmp(&a.cpu).then(b.memory().cmp(&a.memory())));
-        for g in gs.iter().take(4) {
-            let (name, _) = super::top::group_identity(g, s);
-            let b = gtk::Button::new();
-            b.add_css_class("flat");
-            b.add_css_class("dash-app");
-            let row = widgets::hbox(10);
-            row.append(&letter_tile(&name));
-            let n = widgets::label(&name, "dash-app-name");
-            n.set_hexpand(true);
-            n.set_xalign(0.0);
-            n.set_ellipsize(pango::EllipsizeMode::End);
-            row.append(&n);
-            for text in [fmt::pct(g.cpu), fmt::bytes(g.memory() as f64)] {
-                let v = widgets::label(&text, "dash-app-value");
-                v.add_css_class("tnum");
-                v.set_xalign(1.0);
-                v.set_width_chars(9);
-                row.append(&v);
-            }
-            b.set_child(Some(&row));
-            let procs = if g.procs == 1 { "1 process".to_string() } else { format!("{} processes", g.procs) };
-            b.set_tooltip_text(Some(&format!("{name} · {procs}\nShow it in Processes")));
-            let pid = g.leader;
-            b.connect_clicked(move |_| super::processes::reveal(pid));
-            list.append(&b);
-        }
-        empty.set_text(if s.procs.is_none() { "Paused while the window is hidden." } else { "Nothing busy right now." });
-        empty.set_visible(gs.is_empty());
+        list.set(&parts::busiest(s, super::top::By::Cpu, 5, parts::memory_of));
     });
     c
 }
 
 fn battery_card() -> Card {
-    let (c, _) = card("battery", "battery-symbolic", "Details", || window::navigate("sensors"), 1);
-    let (v, sub) = big_value(&c.root);
+    let (c, _) = card("battery", "battery-symbolic", None, || window::navigate("sensors"), 1);
+    let (v, sub) = big_value(&c.root, "Battery");
     let holder = widgets::vbox(0);
     holder.set_vexpand(true);
     holder.set_valign(gtk::Align::End);
@@ -986,8 +938,8 @@ fn battery_card() -> Card {
 }
 
 fn load_card() -> Card {
-    let (c, _) = card("load", "activity-cpu-symbolic", "Details", || window::navigate("cpu"), 1);
-    let (v, sub) = big_value(&c.root);
+    let (c, _) = card("load", "activity-cpu-symbolic", None, || window::navigate("cpu"), 1);
+    let (v, sub) = big_value(&c.root, "Load");
     c.root.append(&spark("cpu.load", "teal", Scale::Auto { floor: 1.0 }, 54, |v| format!("{v:.2}")));
     let note = foot(&c.root);
     live::on_tick(&c.root, move |s| {
@@ -1025,8 +977,8 @@ fn startup_info() -> StartupInfo {
 }
 
 fn startup_card() -> Card {
-    let (c, _) = card("startup", "system-reboot-symbolic", "Manage", || window::navigate("startup"), 3);
-    let row = widgets::hbox(28);
+    let (c, _) = card("startup", "system-reboot-symbolic", Some("Manage"), || window::navigate("startup"), 1);
+    let row = widgets::vbox(4);
     row.add_css_class("dash-startup");
     let apps = widgets::label("", "dash-startup-item");
     let login = widgets::label("", "dash-startup-item");
@@ -1049,15 +1001,17 @@ fn startup_card() -> Card {
             cmd::background(startup_info, move |i| {
                 apps.set_markup(&format!("<b>{}</b> {} at login", i.apps, if i.apps == 1 { "app starts" } else { "apps start" }));
                 let took = super::startup::short_time(i.login);
-                login.set_markup(&match (&i.slowest, i.login > 0.0) {
-                    (Some((name, s)), true) => format!(
-                        "Your last login took <b>{took}</b>; {} was slowest at {}",
-                        glib::markup_escape_text(name),
-                        super::startup::short_time(*s)
-                    ),
-                    (_, true) => format!("Your last login took <b>{took}</b>"),
-                    _ => "Login wasn't timed".into(),
+                login.set_markup(&if i.login > 0.0 {
+                    format!("Last login took <b>{took}</b>")
+                } else {
+                    "Login wasn't timed".into()
                 });
+                login.set_tooltip_text(
+                    i.slowest
+                        .as_ref()
+                        .map(|(name, s)| format!("{name} was slowest at {}", super::startup::short_time(*s)))
+                        .as_deref(),
+                );
             });
         }
     };
@@ -1070,6 +1024,7 @@ fn startup_card() -> Card {
             1 => "<b>1</b> service failed".to_string(),
             n => format!("<b>{n}</b> services failed"),
         });
+        widgets::set_warn(&failed, n > 0);
     };
     refresh_failed();
     alerts::connect_failed(refresh_failed);
@@ -1112,31 +1067,89 @@ fn problem_banner(p: &Problem) -> gtk::Box {
     b
 }
 
-/// The problems, two side by side when there's room. The holder stays on screen, so
-/// it keeps hearing the ticks while there's nothing to show.
+/// "2 things need a look", each named after it, and Show to list them in full.
+fn problems_strip(now: &[Problem], open: bool) -> gtk::Box {
+    let b = widgets::hbox(12);
+    b.add_css_class("dash-alert");
+    b.add_css_class("dash-strip");
+    b.add_css_class(if now.iter().any(|p| p.bad) { "bad" } else { "warn" });
+    let icon = gtk::Image::from_icon_name("dialog-warning-symbolic");
+    icon.add_css_class("dash-alert-icon");
+    b.append(&icon);
+    b.append(&widgets::label(&format!("{} things need a look", now.len()), "dash-alert-title"));
+    let items = widgets::hbox(14);
+    items.set_hexpand(true);
+    items.set_overflow(gtk::Overflow::Hidden);
+    for p in now {
+        let it = widgets::hbox(6);
+        let dot = widgets::hbox(0);
+        dot.add_css_class("dash-dot");
+        dot.add_css_class(if p.bad { "bad" } else { "warn" });
+        dot.set_valign(gtk::Align::Center);
+        it.append(&dot);
+        let t = widgets::label(&p.title, "dash-alert-detail");
+        t.set_ellipsize(pango::EllipsizeMode::End);
+        t.set_tooltip_text(Some(&p.detail));
+        it.append(&t);
+        items.append(&it);
+    }
+    b.append(&items);
+    let show = gtk::Button::with_label(if open { "Hide" } else { "Show" });
+    show.add_css_class("dash-alert-action");
+    show.set_valign(gtk::Align::Center);
+    show.connect_clicked(|_| {
+        PROBLEMS_OPEN.with(|o| o.set(!o.get()));
+        if let Some(s) = live::latest() {
+            PROBLEMS_REFRESH.with(|r| {
+                if let Some(f) = r.borrow().as_ref() {
+                    f(&s);
+                }
+            });
+        }
+    });
+    b.append(&show);
+    b
+}
+
+type Refresh = Rc<dyn Fn(&Snapshot)>;
+
+thread_local! {
+    static PROBLEMS_OPEN: Cell<bool> = const { Cell::new(false) };
+    static PROBLEMS_REFRESH: RefCell<Option<Refresh>> = const { RefCell::new(None) };
+}
+
+/// The problems: one on its own line; several as one strip that opens to the list. The
+/// holder stays on screen, so it keeps hearing the ticks while there's nothing to show.
 fn problems_row() -> gtk::Box {
     let holder = widgets::vbox(0);
-    let row = charts::flow_row(&[], 420, 2, true);
+    let row = widgets::vbox(8);
     row.add_css_class("dash-alerts");
     holder.append(&row);
-    let shown: Rc<RefCell<Vec<Problem>>> = Rc::default();
+    let shown: Rc<RefCell<(Vec<Problem>, bool)>> = Rc::default();
     let refresh: Rc<dyn Fn(&Snapshot)> = {
         let row = row.clone();
         Rc::new(move |s: &Snapshot| {
             let now = alerts::problems(s);
-            if *shown.borrow() == now {
+            let open = PROBLEMS_OPEN.with(|o| o.get());
+            if shown.borrow().0 == now && shown.borrow().1 == open {
                 return;
             }
             while let Some(c) = row.first_child() {
                 row.remove(&c);
             }
-            for p in &now {
-                row.append(&problem_banner(p));
+            if now.len() > 1 {
+                row.append(&problems_strip(&now, open));
+            }
+            if now.len() == 1 || open {
+                for p in &now {
+                    row.append(&problem_banner(p));
+                }
             }
             row.set_visible(!now.is_empty());
-            *shown.borrow_mut() = now;
+            *shown.borrow_mut() = (now, open);
         })
     };
+    PROBLEMS_REFRESH.with(|r| *r.borrow_mut() = Some(refresh.clone()));
     row.set_visible(false);
     let r = refresh.clone();
     live::on_tick(&holder, move |s| r(s));

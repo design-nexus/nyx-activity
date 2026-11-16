@@ -122,23 +122,26 @@ impl Default for Prefs {
     }
 }
 
-/// Processes columns hidden by default: Name, CPU, Memory, Disk and Network show.
-pub const DEFAULT_HIDDEN: &[&str] = &["pid", "user", "gpu", "threads", "state"];
-pub const PROCESSES_LAYOUT: u32 = 2;
+/// Processes columns hidden by default: Name, CPU, Memory, Disk and GPU show.
+pub const DEFAULT_HIDDEN: &[&str] = &["pid", "user", "net", "threads", "state"];
+pub const PROCESSES_LAYOUT: u32 = 3;
 
 impl Prefs {
     /// Settings saved before Processes put apps first: its columns and view go to the new
-    /// defaults once (the old Tree view is All indented by parent).
+    /// defaults once (the old Tree view is All indented by parent). Before layout 3, only
+    /// the columns: GPU took Network's place.
     pub fn migrate_processes(&mut self) -> bool {
         if self.processes_layout >= PROCESSES_LAYOUT {
             return false;
         }
+        if self.processes_layout < 2 {
+            self.process_tree = self.process_view == "tree";
+            self.process_view = if self.process_tree { "all".into() } else { "apps".into() };
+            self.column_order.clear();
+            self.column_widths.clear();
+        }
         self.processes_layout = PROCESSES_LAYOUT;
-        self.process_tree = self.process_view == "tree";
-        self.process_view = if self.process_tree { "all".into() } else { "apps".into() };
         self.hidden_columns = DEFAULT_HIDDEN.iter().map(|c| c.to_string()).collect();
-        self.column_order.clear();
-        self.column_widths.clear();
         true
     }
 }
@@ -158,5 +161,12 @@ mod tests {
         p.process_view = "mine".into();
         assert!(!p.migrate_processes());
         assert_eq!(p.process_view, "mine");
+        let mut p =
+            Prefs { processes_layout: 2, process_view: "mine".into(), hidden_columns: vec!["gpu".into()], ..Default::default() };
+        assert!(p.migrate_processes());
+        assert_eq!(
+            (p.process_view.as_str(), p.hidden_columns.as_slice()),
+            ("mine", DEFAULT_HIDDEN.iter().map(|c| c.to_string()).collect::<Vec<_>>().as_slice())
+        );
     }
 }

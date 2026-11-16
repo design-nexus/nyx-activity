@@ -133,7 +133,10 @@ pub fn save(state: &State) -> Result<()> {
 /// loader of `activity.lua`).
 pub fn included() -> bool {
     std::fs::read_to_string(paths::hyprland_lua())
-        .map(|t| t.lines().any(|l| !l.trim_start().starts_with("--") && (l.contains("hypr.activity") || l.contains("hypr/activity.lua"))))
+        .map(|t| {
+            t.lines()
+                .any(|l| !l.trim_start().starts_with("--") && (l.contains("hypr.activity") || l.contains("hypr/activity.lua")))
+        })
         .unwrap_or(false)
 }
 
@@ -483,7 +486,9 @@ pub fn timers(user: bool) -> Vec<Timer> {
 /// `systemctl show -p …` as key/value pairs.
 pub fn unit_props(unit: &str, user: bool) -> HashMap<String, String> {
     let scope = if user { "--user" } else { "--system" };
-    let props = "MainPID,MemoryCurrent,CPUUsageNSec,ActiveEnterTimestamp,FragmentPath,Restart,ExecStart,ActiveState,SubState";
+    let props = "MainPID,MemoryCurrent,CPUUsageNSec,ActiveEnterTimestamp,FragmentPath,Restart,ExecStart,ActiveState,SubState,\
+                 StateChangeTimestamp,StateChangeTimestampMonotonic,ActiveEnterTimestampMonotonic,\
+                 ExecMainStartTimestampMonotonic,ExecMainExitTimestampMonotonic";
     let text = cmd::output(&["systemctl", scope, "show", unit, "-p", props, "--no-pager"]).unwrap_or_default();
     parse_props(&text)
 }

@@ -14,8 +14,6 @@ pub struct Counters {
     pub write_ms: u64,
     pub in_flight: u64,
     pub io_ms: u64,
-    /// Time requests spent queued or in service, summed over requests.
-    pub weighted_ms: u64,
 }
 
 /// `/proc/diskstats` counters by device name.
@@ -38,7 +36,6 @@ pub fn parse_diskstats(text: &str) -> HashMap<String, Counters> {
                     write_ms: n(10),
                     in_flight: n(11),
                     io_ms: n(12),
-                    weighted_ms: n(13),
                 },
             ))
         })
@@ -76,13 +73,9 @@ pub struct Disk {
     pub write_iops: f64,
     /// Average time a request took, ms.
     pub latency_ms: f64,
-    /// Average number of requests queued or in service.
-    pub queue: f64,
     pub read_total: u64,
     pub written_total: u64,
     pub temp: Option<f64>,
-    pub firmware: String,
-    pub transport: String,
     pub mounts: Vec<Mount>,
 }
 
@@ -169,8 +162,6 @@ struct Info {
     size: u64,
     rotational: bool,
     removable: bool,
-    firmware: String,
-    transport: String,
 }
 
 pub struct DiskSampler {
@@ -203,30 +194,7 @@ impl DiskSampler {
                 let size = read(&format!("{base}/size")).trim().parse::<u64>().unwrap_or(0) * 512;
                 let rota = read(&format!("{base}/queue/rotational")).trim() == "1";
                 let removable = read(&format!("{base}/removable")).trim() == "1";
-                let firmware = [format!("{base}/device/firmware_rev"), format!("{base}/device/rev")]
-                    .iter()
-                    .map(|p| read(p).trim().to_string())
-                    .find(|v| !v.is_empty())
-                    .unwrap_or_default();
-                let transport = match read(&format!("{base}/device/transport")).trim() {
-                    "pcie" => "PCIe".to_string(),
-                    "" if n.starts_with("sd") => {
-                        if std::fs::canonicalize(format!("{base}/device")).is_ok_and(|p| p.to_string_lossy().contains("/usb")) {
-                            "USB".into()
-                        } else {
-                            "SATA".into()
-                        }
-                    }
-                    t => t.to_uppercase(),
-                };
-                Info {
-                    model: if model.is_empty() { n.clone() } else { model },
-                    size,
-                    rotational: rota,
-                    removable,
-                    firmware,
-                    transport,
-                }
+                Info { model: if model.is_empty() { n.clone() } else { model }, size, rotational: rota, removable }
             });
         }
         self.mounts = parse_mounts(&read("/proc/mounts"))
@@ -260,8 +228,6 @@ impl DiskSampler {
                 size: info.size,
                 rotational: info.rotational,
                 removable: info.removable,
-                firmware: info.firmware,
-                transport: info.transport,
                 read_total: now.sectors_read * 512,
                 written_total: now.sectors_written * 512,
                 temp: self.temps.get(n).copied().flatten(),
@@ -280,7 +246,6 @@ impl DiskSampler {
                 if reads + writes > 0.0 {
                     d.latency_ms = (delta(now.read_ms, prev.read_ms) + delta(now.write_ms, prev.write_ms)) / (reads + writes);
                 }
-                d.queue = delta(now.weighted_ms, prev.weighted_ms) / (elapsed * 1000.0);
             }
             d.mounts = self
                 .mounts
@@ -314,7 +279,6 @@ mod tests {
         assert_eq!(c.sectors_written, 800);
         assert_eq!(c.write_ms, 5);
         assert_eq!(c.io_ms, 33);
-        assert_eq!(c.weighted_ms, 62);
     }
 
     #[test]

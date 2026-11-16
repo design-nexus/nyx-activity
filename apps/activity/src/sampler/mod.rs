@@ -69,6 +69,8 @@ pub struct Control {
     pub paused: AtomicBool,
     /// Take a sample now instead of waiting out the interval.
     pub poke: AtomicBool,
+    /// Read a GPU that's asleep or idle once, though it wakes it.
+    pub read_gpu: AtomicBool,
 }
 
 impl Control {
@@ -78,6 +80,7 @@ impl Control {
             detail: AtomicBool::new(true),
             paused: AtomicBool::new(false),
             poke: AtomicBool::new(false),
+            read_gpu: AtomicBool::new(false),
         })
     }
 }
@@ -103,8 +106,8 @@ pub fn start(control: Arc<Control>) -> async_channel::Receiver<Snapshot> {
                 last = now;
                 let detail = control.detail.load(Ordering::Relaxed);
                 let mut snap = Snapshot {
-                    cpu: cpu.sample(elapsed),
-                    mem: mem.sample(elapsed),
+                    cpu: cpu.sample(),
+                    mem: mem.sample(),
                     disks: disks.sample(elapsed),
                     nets: nets.sample(elapsed),
                     sensors: sensors::sample(),
@@ -117,12 +120,13 @@ pub fn start(control: Arc<Control>) -> async_channel::Receiver<Snapshot> {
                     let (list, clients) = procs.sample(detail_elapsed);
                     snap.process_count = list.len();
                     snap.thread_count = list.iter().map(|p| p.threads as u64).sum();
-                    snap.gpus = gpus.sample(&clients);
-                    snap.groups = groups::groups(&list);
-                    snap.conns = Some(conns::sample(&clients.sockets));
+                    snap.gpus = gpus.sample(&clients, control.read_gpu.swap(false, Ordering::Relaxed));
                     if tick.is_multiple_of(2) {
                         windows = windows::clients();
                     }
+                    let owners: std::collections::HashSet<i32> = windows.iter().map(|w: &windows::Window| w.pid).collect();
+                    snap.groups = groups::groups(&list, &owners);
+                    snap.conns = Some(conns::sample(&clients.sockets));
                     snap.windows = windows.clone();
                     snap.procs = Some(list);
                 }

@@ -94,6 +94,8 @@ pub struct GroupRow {
     pub leader: i32,
     /// What its cgroup is charged for, counting shared pages once.
     pub memory: Option<u64>,
+    /// Its windows on screen.
+    pub windows: u32,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -357,7 +359,7 @@ fn icon_exists(icon: &str) -> bool {
     })
 }
 
-fn face(class: &str, size: i32) -> gtk::Box {
+pub(crate) fn face(class: &str, size: i32) -> gtk::Box {
     let root = widgets::hbox(0);
     root.add_css_class("proc-face");
     root.add_css_class(class);
@@ -379,7 +381,7 @@ fn face(class: &str, size: i32) -> gtk::Box {
 
 /// The app's own icon when there is one, else its first letter on an Umbra-style tile
 /// in a colour picked by its name.
-fn set_face(root: &gtk::Widget, icon: &str, name: &str, light: bool) {
+pub(crate) fn set_face(root: &gtk::Widget, icon: &str, name: &str, light: bool) {
     let Some(image) = root.first_child().and_downcast::<gtk::Image>() else { return };
     let Some(tile) = image.next_sibling() else { return };
     let Some(letter) = tile.first_child().and_downcast::<gtk::Label>() else { return };
@@ -547,6 +549,9 @@ fn render(col: Col, row: &Row, w: &gtk::Widget, look: Look) {
             }
             set_class(name, "strong", look.apps && !kid);
             let subtitle = match (&row.group, row.agg) {
+                (Some(g), Some(a)) if g.windows > 1 => {
+                    format!("{} windows · {}", g.windows, plural(a.count, "process", "processes"))
+                }
                 (Some(_), Some(a)) => plural(a.count, "process", "processes"),
                 (Some(_), None) => String::new(),
                 _ if look.apps && !kid => String::new(),
@@ -716,7 +721,8 @@ fn header_factory() -> gtk::SignalListItemFactory {
 /// A heading in its section's colour, with how many rows are under it.
 fn render_header(s: &State, h: &gtk::ListHeader) {
     let (Some(obj), Some(row)) = (h.item().and_downcast::<ProcObject>(), h.child()) else { return };
-    let (Some(label), Some(count)) = (row.first_child().and_downcast::<gtk::Label>(), row.last_child().and_downcast::<gtk::Label>())
+    let (Some(label), Some(count)) =
+        (row.first_child().and_downcast::<gtk::Label>(), row.last_child().and_downcast::<gtk::Label>())
     else {
         return;
     };
@@ -979,6 +985,7 @@ fn group_row(id: i32, g: &Group, snap: &Snapshot, leader: Option<&Proc>) -> Row 
         pids: g.pids.clone(),
         leader: g.leader,
         memory: g.mem,
+        windows: snap.windows.iter().filter(|w| g.pids.contains(&w.pid)).count() as u32,
     };
     Row { p, icon, address, display: name, group: Some(group), ..Default::default() }
 }
@@ -1446,14 +1453,8 @@ fn object(pid: i32) -> Option<ProcObject> {
 
 // ---------- Actions and menus ----------
 
-const PRIORITIES: &[(&str, i32)] = &[
-    ("Highest (-15)", -15),
-    ("High (-5)", -5),
-    ("Normal (0)", 0),
-    ("Low (5)", 5),
-    ("Lowest (10)", 10),
-    ("Background (19)", 19),
-];
+const PRIORITIES: &[(&str, i32)] =
+    &[("Highest (-15)", -15), ("High (-5)", -5), ("Normal (0)", 0), ("Low (5)", 5), ("Lowest (10)", 10), ("Background (19)", 19)];
 
 fn priority_name(nice: i32) -> String {
     match PRIORITIES.iter().find(|(_, n)| *n == nice) {
@@ -1668,6 +1669,7 @@ struct Inspector {
     shows: RefCell<String>,
     about: Vec<(gtk::Box, gtk::Label)>,
     buttons: Buttons,
+    summary: Summary,
 }
 
 /// The facts under About it, in order.
@@ -1680,13 +1682,7 @@ fn inspector() -> Inspector {
     root.set_hexpand(false);
     let stack = gtk::Stack::new();
     stack.set_vexpand(true);
-    let none = widgets::label("Choose an app or process to see its graphs and details.", "empty-state");
-    none.set_wrap(true);
-    none.set_justify(gtk::Justification::Center);
-    none.set_xalign(0.5);
-    none.set_valign(gtk::Align::Center);
-    none.set_margin_start(24);
-    none.set_margin_end(24);
+    let (none, summary) = summary();
     stack.add_named(&none, Some("none"));
 
     let info = widgets::vbox(0);
@@ -1811,6 +1807,181 @@ fn inspector() -> Inspector {
         shows: RefCell::new(String::new()),
         about,
         buttons,
+        summary,
+    }
+}
+
+/// What the inspector says while nothing is chosen: how the machine is doing.
+struct Summary {
+    title: gtk::Label,
+    sub: gtk::Label,
+    cpu: (gtk::DrawingArea, super::dashboard::Parts, Vec<gtk::Label>),
+    mem: (gtk::DrawingArea, super::dashboard::Parts, Vec<gtk::Label>),
+    started: gtk::Box,
+    /// The pids listed under Started (None before the first look).
+    shown: RefCell<Option<Vec<i32>>>,
+}
+
+/// The sections' colours, as the headings in the list have them.
+const SEC_SWATCHES: &[&str] = &["blue", "green", "violet"];
+
+fn summary() -> (gtk::ScrolledWindow, Summary) {
+    let body = widgets::vbox(0);
+    body.add_css_class("insp-body");
+    body.add_css_class("insp-summary");
+    let head = widgets::vbox(1);
+    head.add_css_class("insp-head");
+    let title = widgets::label("", "insp-title");
+    title.add_css_class("tnum");
+    let sub = widgets::label("", "insp-sub");
+    sub.add_css_class("tnum");
+    sub.set_wrap(true);
+    head.append(&title);
+    head.append(&sub);
+    body.append(&head);
+    let split = |label: &str| {
+        let lab = widgets::hbox(6);
+        lab.add_css_class("insp-lab");
+        lab.append(&widgets::label(label, ""));
+        body.append(&lab);
+        let card = widgets::vbox(10);
+        card.add_css_class("insp-card");
+        card.add_css_class("insp-split");
+        let (bar, parts) = super::dashboard::split_bar(SEC_SWATCHES);
+        card.append(&bar);
+        // The keys wrap in a column this narrow.
+        let (row, labels) = super::dashboard::key_row(&[("", "blue"), ("", "green"), ("", "violet")]);
+        let flow = crate::parts::wrap_keys(&row);
+        card.append(&flow);
+        body.append(&card);
+        (bar, parts, labels)
+    };
+    let cpu = split("Processor by group");
+    let mem = split("Memory by group");
+    let lab = widgets::hbox(6);
+    lab.add_css_class("insp-lab");
+    lab.append(&widgets::label("Started since you opened Activity", ""));
+    body.append(&lab);
+    let started = widgets::vbox(0);
+    started.add_css_class("insp-card");
+    body.append(&started);
+    let scroll = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vscrollbar_policy(gtk::PolicyType::External)
+        .vexpand(true)
+        .child(&body)
+        .build();
+    (scroll, Summary { title, sub, cpu, mem, started, shown: RefCell::default() })
+}
+
+/// "40 s ago", "4 min ago", "2 h ago".
+fn ago(secs: f64) -> String {
+    let s = secs.max(0.0);
+    if s < 60.0 {
+        format!("{:.0} s ago", s)
+    } else if s < 3600.0 {
+        format!("{:.0} min ago", (s / 60.0).floor())
+    } else {
+        format!("{:.0} h ago", (s / 3600.0).floor())
+    }
+}
+
+fn refresh_summary(s: &State, d: &Inspector, snap: &Snapshot) {
+    let m = &d.summary;
+    let Some(procs) = &snap.procs else { return };
+    let mine = procs.iter().filter(|p| p.uid == s.my_uid && !p.kernel).count();
+    set_text(&m.title, &format!("{} processes", super::dashboard::thousands(snap.process_count as u64)));
+    set_text(
+        &m.sub,
+        &format!(
+            "{} threads · you run {} of them",
+            super::dashboard::thousands(snap.thread_count),
+            super::dashboard::thousands(mine as u64)
+        ),
+    );
+    // Each process's section, as the list files it.
+    let section: HashMap<i32, Sec> =
+        s.objects.values().map(|o| o.row()).filter(|r| r.group.is_none()).map(|r| (r.p.pid, r.section)).collect();
+    let mut cpu = [0.0f64; 3];
+    for p in procs.iter().filter(|p| !p.kernel) {
+        cpu[section.get(&p.pid).copied().unwrap_or(Sec::System).index()] += p.cpu;
+    }
+    let mut mem = [0.0f64; 3];
+    let mut grouped: HashSet<i32> = HashSet::new();
+    for g in &snap.groups {
+        mem[section.get(&g.leader).copied().unwrap_or(Sec::System).index()] += g.memory() as f64;
+        grouped.extend(&g.pids);
+    }
+    for p in procs.iter().filter(|p| !p.kernel && !grouped.contains(&p.pid)) {
+        mem[section.get(&p.pid).copied().unwrap_or(Sec::System).index()] += p.rss as f64;
+    }
+    let set = |(bar, parts, labels): &(gtk::DrawingArea, super::dashboard::Parts, Vec<gtk::Label>),
+               values: [f64; 3],
+               total: f64,
+               show: &dyn Fn(f64) -> String| {
+        let v = values.to_vec();
+        if parts.borrow().0 != v || parts.borrow().1 != total {
+            *parts.borrow_mut() = (v, total);
+            bar.queue_draw();
+        }
+        for ((l, sec), v) in labels.iter().zip(SECS).zip(values) {
+            l.set_markup(&format!("{} <b>{}</b>", sec.title(), show(v)));
+        }
+    };
+    set(&m.cpu, cpu, 100.0, &|v| fmt::pct(v));
+    set(&m.mem, mem, snap.mem.total.max(1) as f64, &|v| fmt::bytes(v));
+
+    // What started after Activity did, newest first.
+    let me = std::process::id() as i32;
+    let since = procs.iter().find(|p| p.pid == me).map_or(f64::MAX, |p| p.start);
+    // Ones that have kept going a little while: a script's `sleep` comes and goes every few seconds.
+    let settled = snap.cpu.uptime - 10.0;
+    let mut new: Vec<&Proc> =
+        procs.iter().filter(|p| !p.kernel && p.start > since && p.start < settled && p.pid != me && p.name != "sleep").collect();
+    new.sort_by(|a, b| b.start.total_cmp(&a.start));
+    new.truncate(5);
+    let pids: Vec<i32> = new.iter().map(|p| p.pid).collect();
+    if m.shown.borrow().as_ref() != Some(&pids) {
+        while let Some(c) = m.started.first_child() {
+            m.started.remove(&c);
+        }
+        for p in &new {
+            let b = gtk::Button::new();
+            b.add_css_class("flat");
+            b.add_css_class("insp-row");
+            b.add_css_class("insp-started");
+            let row = widgets::hbox(10);
+            let n = widgets::label(&p.name, "insp-key");
+            n.set_hexpand(true);
+            n.set_xalign(0.0);
+            n.set_ellipsize(pango::EllipsizeMode::End);
+            let t = widgets::label("", "insp-value");
+            t.add_css_class("tnum");
+            row.append(&n);
+            row.append(&t);
+            b.set_child(Some(&row));
+            b.set_tooltip_text(Some(&format!("{} (PID {})", if p.cmdline.is_empty() { &p.name } else { &p.cmdline }, p.pid)));
+            let pid = p.pid;
+            b.connect_clicked(move |_| {
+                glib::idle_add_local_once(move || reveal(pid));
+            });
+            m.started.append(&b);
+        }
+        if new.is_empty() {
+            let l = widgets::label("Nothing new yet.", "insp-key");
+            l.add_css_class("insp-row");
+            l.set_xalign(0.0);
+            m.started.append(&l);
+        }
+        *m.shown.borrow_mut() = Some(pids);
+    }
+    let mut c = m.started.first_child();
+    for p in &new {
+        let Some(b) = c else { break };
+        if let Some(t) = b.first_child().and_then(|r| r.last_child()).and_downcast::<gtk::Label>() {
+            set_text(&t, &ago(snap.cpu.uptime - p.start));
+        }
+        c = b.next_sibling();
     }
 }
 
@@ -1905,6 +2076,7 @@ fn refresh_details(snap: &Snapshot) {
     let Some(obj) = sel.first() else {
         d.stack.set_visible_child_name("none");
         f.root.set_visible(false);
+        refresh_summary(&s, d, snap);
         return;
     };
     let r = obj.row().clone();

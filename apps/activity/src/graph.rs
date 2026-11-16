@@ -1,6 +1,6 @@
-//! Live line graphs drawn with cairo. Colours come only from the theme tokens:
-//! the first series is `accent`, the second `mix(accent, danger, 0.55)` and
-//! dashed (so the pair never relies on colour alone). Text stays in text tokens.
+//! Live line graphs drawn with cairo. Colours come only from the theme: each
+//! series takes one of its swatches, and a second series is dashed so a pair
+//! never relies on colour alone. Text stays in text tokens.
 
 use crate::theme::{self, Rgb};
 use crate::{live, prefs, widgets};
@@ -11,7 +11,6 @@ use std::rc::Rc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
-    Accent,
     Second,
     /// One of the theme's swatches by name ("blue"), for the Dashboard's cards.
     Swatch(&'static str),
@@ -22,7 +21,6 @@ impl Tone {
         let p = theme::palette();
         let accent = Rgb::hex(&p.accent);
         match self {
-            Tone::Accent => accent,
             Tone::Second => accent.mix(Rgb::hex(&p.danger), 0.55),
             Tone::Swatch(name) => crate::charts::swatch(name),
         }
@@ -30,7 +28,7 @@ impl Tone {
 
     fn class(self) -> &'static str {
         match self {
-            Tone::Accent | Tone::Swatch(_) => "tone-accent",
+            Tone::Swatch(_) => "tone-accent",
             Tone::Second => "tone-second",
         }
     }

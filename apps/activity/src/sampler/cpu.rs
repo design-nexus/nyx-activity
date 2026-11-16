@@ -1,5 +1,5 @@
 //! CPU usage from `/proc/stat`, frequencies from cpufreq, load, pressure and
-//! the processor's layout (core types, caches).
+//! the processor's layout (core types).
 
 use super::read;
 
@@ -40,11 +40,6 @@ impl Times {
 pub struct Stat {
     pub total: Times,
     pub cores: Vec<Times>,
-    pub ctxt: u64,
-    pub intr: u64,
-    pub forks: u64,
-    pub running: u64,
-    pub blocked: u64,
 }
 
 pub fn parse_stat(text: &str) -> Stat {
@@ -52,7 +47,6 @@ pub fn parse_stat(text: &str) -> Stat {
     for line in text.lines() {
         let mut parts = line.split_whitespace();
         let Some(key) = parts.next() else { continue };
-        let first = || line.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
         match key {
             "cpu" => stat.total = Times::parse(&parts.collect::<Vec<_>>()).unwrap_or_default(),
             k if k.starts_with("cpu") => {
@@ -60,11 +54,6 @@ pub fn parse_stat(text: &str) -> Stat {
                     stat.cores.push(t);
                 }
             }
-            "ctxt" => stat.ctxt = first(),
-            "intr" => stat.intr = first(),
-            "processes" => stat.forks = first(),
-            "procs_running" => stat.running = first(),
-            "procs_blocked" => stat.blocked = first(),
             _ => {}
         }
     }
@@ -158,23 +147,6 @@ impl CoreKind {
             CoreKind::Uniform => "Cores",
         }
     }
-
-    pub fn short(self) -> &'static str {
-        match self {
-            CoreKind::Performance => "P",
-            CoreKind::Efficient => "E",
-            CoreKind::LowPower => "LP-E",
-            CoreKind::Uniform => "",
-        }
-    }
-}
-
-/// One level of cache: "L2", 3 MiB per instance, 9 instances.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Cache {
-    pub name: String,
-    pub size: u64,
-    pub instances: usize,
 }
 
 /// What doesn't change while the machine runs.
@@ -187,9 +159,6 @@ pub struct Layout {
     /// Each thread's core id (coretemp names its sensors "Core <id>").
     pub core_ids: Vec<u32>,
     pub max_freqs: Vec<f64>,
-    pub min_freq: f64,
-    pub caches: Vec<Cache>,
-    pub virtualization: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -215,11 +184,6 @@ pub struct Cpu {
     pub turbo: Option<bool>,
     pub load: [f64; 3],
     pub uptime: f64,
-    pub ctxt_per_sec: f64,
-    pub intr_per_sec: f64,
-    pub forks_per_sec: f64,
-    pub running: u64,
-    pub blocked: u64,
     pub pressure: Option<Pressure>,
     /// Physical cores (distinct core ids), when known.
     pub physical: usize,
@@ -240,18 +204,6 @@ fn cpulist(text: &str) -> Vec<usize> {
     out
 }
 
-/// "48K", "3072K", "24M" as bytes.
-fn cache_size(text: &str) -> u64 {
-    let t = text.trim();
-    let (num, mult) = match t.chars().last() {
-        Some('K') => (&t[..t.len() - 1], 1024),
-        Some('M') => (&t[..t.len() - 1], 1024 * 1024),
-        Some('G') => (&t[..t.len() - 1], 1024 * 1024 * 1024),
-        _ => (t, 1),
-    };
-    num.parse::<u64>().unwrap_or(0) * mult
-}
-
 fn layout(threads: usize) -> Layout {
     let info = read("/proc/cpuinfo");
     let field = |name: &str| {
@@ -261,14 +213,6 @@ fn layout(threads: usize) -> Layout {
             .map(|(_, v)| v.split_whitespace().collect::<Vec<_>>().join(" "))
     };
     let model = field("model name").unwrap_or_else(|| "Processor".into());
-    let flags = field("flags").unwrap_or_default();
-    let virtualization = if flags.split(' ').any(|f| f == "vmx") {
-        Some("VT-x")
-    } else if flags.split(' ').any(|f| f == "svm") {
-        Some("AMD-V")
-    } else {
-        None
-    };
     let sys = |i: usize, f: &str| read(&format!("/sys/devices/system/cpu/cpu{i}/{f}"));
     let core_ids: Vec<u32> = (0..threads).map(|i| sys(i, "topology/core_id").trim().parse().unwrap_or(i as u32)).collect();
     let pkg: Vec<String> = (0..threads).map(|i| sys(i, "topology/physical_package_id").trim().to_string()).collect();
@@ -277,7 +221,6 @@ fn layout(threads: usize) -> Layout {
     ids.dedup();
     let max_freqs: Vec<f64> =
         (0..threads).map(|i| sys(i, "cpufreq/cpuinfo_max_freq").trim().parse::<f64>().unwrap_or(0.0) / 1000.0).collect();
-    let min_freq = sys(0, "cpufreq/cpuinfo_min_freq").trim().parse::<f64>().unwrap_or(0.0) / 1000.0;
 
     // Hybrid Intel parts list their P and E cores; the low-power island is in neither.
     let p = cpulist(&read("/sys/devices/cpu_core/cpus"));
@@ -296,38 +239,7 @@ fn layout(threads: usize) -> Layout {
         })
         .collect();
 
-    // Each cache level once per distinct set of threads sharing it.
-    let mut seen: Vec<(String, u64, String)> = Vec::new();
-    for i in 0..threads {
-        for idx in 0..8 {
-            let f = |n: &str| sys(i, &format!("cache/index{idx}/{n}"));
-            let level = f("level").trim().to_string();
-            if level.is_empty() {
-                break;
-            }
-            let name = match f("type").trim() {
-                "Data" => format!("L{level}d"),
-                "Instruction" => format!("L{level}i"),
-                _ => format!("L{level}"),
-            };
-            let entry = (name, cache_size(&f("size")), f("shared_cpu_list").trim().to_string());
-            if !seen.contains(&entry) {
-                seen.push(entry);
-            }
-        }
-    }
-    let mut caches: Vec<Cache> = Vec::new();
-    for (name, size, _) in &seen {
-        match caches.iter_mut().find(|c| &c.name == name) {
-            Some(c) => {
-                c.size += size;
-                c.instances += 1;
-            }
-            None => caches.push(Cache { name: name.clone(), size: *size, instances: 1 }),
-        }
-    }
-    caches.sort_by(|a, b| a.name.cmp(&b.name));
-    Layout { model, physical: ids.len(), kinds, core_ids, max_freqs, min_freq, caches, virtualization }
+    Layout { model, physical: ids.len(), kinds, core_ids, max_freqs }
 }
 
 pub struct CpuSampler {
@@ -344,15 +256,13 @@ impl CpuSampler {
         CpuSampler { prev: None, layout: std::sync::Arc::new(layout), max_freq }
     }
 
-    pub fn sample(&mut self, elapsed: f64) -> Cpu {
+    pub fn sample(&mut self) -> Cpu {
         let stat = parse_stat(&read("/proc/stat"));
         let mut cpu = Cpu {
             layout: self.layout.clone(),
             model: self.layout.model.clone(),
             physical: self.layout.physical,
             max_freq: self.max_freq,
-            running: stat.running,
-            blocked: stat.blocked,
             ..Default::default()
         };
         if let Some(prev) = &self.prev {
@@ -361,12 +271,6 @@ impl CpuSampler {
                 (s.busy, s.user, s.system, s.iowait, s.irq, s.steal);
             cpu.core_split = stat.cores.iter().zip(&prev.cores).map(|(n, p)| split(p, n)).collect();
             cpu.cores = cpu.core_split.iter().map(|s| s.busy).collect();
-            if elapsed > 0.0 {
-                let rate = |a: u64, b: u64| a.saturating_sub(b) as f64 / elapsed;
-                cpu.ctxt_per_sec = rate(stat.ctxt, prev.ctxt);
-                cpu.intr_per_sec = rate(stat.intr, prev.intr);
-                cpu.forks_per_sec = rate(stat.forks, prev.forks);
-            }
         } else {
             cpu.cores = vec![0.0; stat.cores.len()];
             cpu.core_split = vec![Split::default(); stat.cores.len()];
@@ -416,11 +320,6 @@ mod tests {
         assert_eq!(s.total.total, 1000);
         assert_eq!(s.total.idle, 850);
         assert_eq!(s.total.iowait, 50);
-        assert_eq!(s.ctxt, 5000);
-        assert_eq!(s.intr, 1234);
-        assert_eq!(s.forks, 77);
-        assert_eq!(s.running, 3);
-        assert_eq!(s.blocked, 1);
     }
 
     #[test]
@@ -445,10 +344,8 @@ mod tests {
     }
 
     #[test]
-    fn reads_cpu_lists_and_cache_sizes() {
+    fn reads_cpu_lists() {
         assert_eq!(cpulist("0-2,6,8-9\n"), vec![0, 1, 2, 6, 8, 9]);
         assert_eq!(cpulist(""), Vec::<usize>::new());
-        assert_eq!(cache_size("48K"), 48 * 1024);
-        assert_eq!(cache_size("24M\n"), 24 * 1024 * 1024);
     }
 }

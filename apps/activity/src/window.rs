@@ -1,11 +1,11 @@
 //! The main window: the header (the app and the page, the sidebar toggle; what's
 //! running, the live/paused pill, the page's config files, search and settings at the
 //! end), the navigation sidebar and a stack of section pages built the first time
-//! they're shown. Settings opens as a dialog over the window (see `settings_dialog`).
+//! they're shown.
 
 use crate::sections::{self, Section};
 use crate::widgets;
-use crate::{live, prefs, settings_dialog, theme};
+use crate::{live, prefs, theme};
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 use nyx_ui::chrome;
@@ -23,7 +23,6 @@ struct Ui {
     /// The one toast, reused so quick messages replace each other.
     toast: gtk::Label,
     toast_timer: Option<glib::SourceId>,
-    overlay: gtk::Overlay,
     /// Holds the current page's "open the config file" button.
     edit: gtk::Box,
     header: chrome::AppHeader,
@@ -77,6 +76,7 @@ fn install_icons() {
         ("activity-processes-symbolic.svg", include_str!("../data/icons/activity-processes-symbolic.svg")),
         ("activity-filter-symbolic.svg", include_str!("../data/icons/activity-filter-symbolic.svg")),
         ("activity-window-symbolic.svg", include_str!("../data/icons/activity-window-symbolic.svg")),
+        ("activity-fan-symbolic.svg", include_str!("../data/icons/activity-fan-symbolic.svg")),
     ];
     let dir = crate::paths::cache_dir().join("icons");
     for (name, svg) in ICONS {
@@ -99,7 +99,7 @@ fn build(app: &gtk::Application) {
     nyx_ui::keys::install(
         &window,
         nyx_ui::keys::Common {
-            settings: Some(settings_dialog::open),
+            settings: Some(|| navigate("settings")),
             shortcuts: Some(show_shortcuts),
             close: false,
             palette: Some(crate::palette::open),
@@ -122,14 +122,14 @@ fn build(app: &gtk::Application) {
     let mut nav_items = HashMap::new();
     let mut last_group = "";
     let mut labelled = 0;
-    // Settings opens as a dialog from the top bar, so it has no nav item.
-    for s in sections.iter().filter(|s| s.id != "settings") {
+    for s in sections.iter() {
         if s.group != last_group && !s.group.is_empty() {
             // The first heading in the app's accent, System in violet. The icon rail shows
             // a short bar in the colour where the heading was.
             let section = match labelled {
                 0 => nyx_ui::sidebar::ACCENT_SECTION.to_string(),
-                _ => "swatch-violet".to_string(),
+                1 => "swatch-violet".to_string(),
+                _ => "swatch-graphite".to_string(),
             };
             let bar = gtk::Separator::new(gtk::Orientation::Horizontal);
             bar.add_css_class("nav-divider");
@@ -208,7 +208,7 @@ fn build(app: &gtk::Application) {
     let edit = widgets::hbox(4);
     header.end.append(&edit);
     header.end.append(&pause_button());
-    header.end.append(&chrome::settings_button(settings_dialog::open));
+    header.end.append(&chrome::settings_button(|| navigate("settings")));
 
     let frame = nyx_ui::frame::AppFrame::new(&header.root);
     frame.set_sidebar(&nav);
@@ -231,23 +231,6 @@ fn build(app: &gtk::Application) {
     let w2 = window.clone();
     keys.connect_key_pressed(move |_, key, _, mods| {
         let ctrl = mods.contains(gdk::ModifierType::CONTROL_MASK);
-        if settings_dialog::is_open() {
-            return match key {
-                gdk::Key::Escape => {
-                    settings_dialog::escape();
-                    glib::Propagation::Stop
-                }
-                gdk::Key::f if ctrl => {
-                    settings_dialog::focus_search();
-                    glib::Propagation::Stop
-                }
-                gdk::Key::q | gdk::Key::w if ctrl => {
-                    w2.close();
-                    glib::Propagation::Stop
-                }
-                _ => glib::Propagation::Proceed,
-            };
-        }
         match key {
             gdk::Key::f if ctrl => {
                 find();
@@ -290,7 +273,6 @@ fn build(app: &gtk::Application) {
         move |w: &gtk::ApplicationWindow| {
             let width = if w.width() > 0 { w.width() } else { w.default_width() };
             let narrow = width > 0 && width < 980;
-            settings_dialog::fit(w);
             if narrow == NARROW.with(|n| n.get()) && nav.has_css_class("sized") {
                 return;
             }
@@ -336,19 +318,8 @@ fn build(app: &gtk::Application) {
         live::set_detail(!(w.is_suspended() && prefs::get().pause_hidden));
     });
 
-    let ui = Ui {
-        window,
-        stack,
-        nav_items,
-        pages: HashMap::new(),
-        sections,
-        current: "",
-        toast,
-        toast_timer: None,
-        overlay,
-        edit,
-        header,
-    };
+    let ui =
+        Ui { window, stack, nav_items, pages: HashMap::new(), sections, current: "", toast, toast_timer: None, edit, header };
     UI.with(|u| *u.borrow_mut() = Some(Rc::new(RefCell::new(ui))));
 }
 
@@ -428,11 +399,6 @@ pub fn show_shortcuts() {
     close.connect_clicked(move |_| d.close());
     card.append(&close);
     dialog.present();
-}
-
-/// The layer over the window, for the settings dialog.
-pub fn overlay() -> Option<gtk::Overlay> {
-    ui().map(|u| u.borrow().overlay.clone())
 }
 
 /// The sidebar shows only icons: hide the labels, centre the icons and the toggle.
@@ -612,14 +578,7 @@ fn mark_first_heading(root: &gtk::Widget) {
 
 pub fn navigate(id: &str) {
     let Some(ui) = ui() else { return };
-    // Settings is a dialog over the window, not a page.
-    if id == "settings" {
-        settings_dialog::open();
-        if !ui.borrow().current.is_empty() {
-            return;
-        }
-    }
-    let id = if id == "settings" || id == "dashboard" { "overview" } else { id };
+    let id = if id == "dashboard" { "overview" } else { id };
     let resolved = {
         let u = ui.borrow();
         u.sections.iter().find(|s| s.id == id).or_else(|| u.sections.first()).map(|s| s.id)
