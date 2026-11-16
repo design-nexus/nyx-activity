@@ -304,6 +304,7 @@ impl ProcSampler {
                     {
                         name = program.to_string();
                     }
+                    let name = unwrapped(&name);
                     let cgroup = read(&format!("{base}/cgroup"))
                         .lines()
                         .find_map(|l| l.strip_prefix("0::"))
@@ -400,8 +401,29 @@ impl ProcSampler {
     }
 }
 
+/// The program's own name for Nix's wrapper, `.NAME-wrapped` (wrapped again:
+/// `..NAME-wrapped-wrapped`); other names as they are.
+fn unwrapped(name: &str) -> String {
+    let mut n = name;
+    while let Some(inner) = n.strip_prefix('.').and_then(|x| x.strip_suffix("-wrapped")) {
+        if inner.is_empty() {
+            break;
+        }
+        n = inner;
+    }
+    n.to_string()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn nix_wrapper_names_are_unwrapped() {
+        assert_eq!(super::unwrapped(".nyx-assistant-wrapped"), "nyx-assistant");
+        assert_eq!(super::unwrapped("..firefox-wrapped-wrapped"), "firefox");
+        assert_eq!(super::unwrapped("bash"), "bash");
+        assert_eq!(super::unwrapped(".-wrapped"), ".-wrapped");
+    }
+
     use super::*;
 
     #[test]
