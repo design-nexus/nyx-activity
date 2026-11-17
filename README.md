@@ -1,7 +1,7 @@
 # Activity
 
-A task manager for [Omarchy](https://omarchy.org). It takes its colors from your
-Omarchy theme and fits a half-screen tile.
+A task manager for NyxOS and [Omarchy](https://omarchy.org). It takes its colors from the
+desktop theme and fits a half-screen tile.
 
 ## What it does
 
@@ -75,6 +75,8 @@ On hybrid laptops the discrete GPU sleeps when nothing uses it. Activity keeps i
 While the window is hidden, the per-process and GPU sampling stops too.
 
 ## Install
+
+On NyxOS, Activity comes with the system. On Omarchy:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/design-nexus/nyx-activity/main/install.sh | bash -s -- activity
